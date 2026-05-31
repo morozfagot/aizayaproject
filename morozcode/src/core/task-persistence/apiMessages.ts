@@ -50,8 +50,16 @@ export type RelevanceTags = {
 
 /** Фрагмент сообщения с тегами релевантности (для chunk-level RAG) */
 export type MessageFragment = {
+	/** Уникальный ID фрагмента: "msg-{ts}-frag-{n}" */
 	chunk_id: string
-	tags?: RelevanceTags
+	/** Оригинальный текст фрагмента (для embedding) */
+	text: string
+	/** Краткая суммаризация (1-2 предложения) */
+	summary: string
+	/** Теги фрагмента — для pre-filter RAG-поиска */
+	tags: RelevanceTags
+	/** Ссылка на embedding (заполнится в 2.9.4) */
+	embedding_ref?: string
 }
 
 /** ApiMessage с расширенной системой тегов релевантности */

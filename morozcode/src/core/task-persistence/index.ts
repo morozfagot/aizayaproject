@@ -26,3 +26,20 @@ export {
 	persistTagIndex,
 } from "./tagIndex"
 export { generateAutoTags, validateTags, tagWeightBoost, createEmptyTags } from "./relevanceTags"
+export {
+	type RefactoringLockState,
+	type WaitForRefactoringDoneOptions,
+	setRefactoringFlag,
+	clearRefactoringFlag,
+	waitForRefactoringDone,
+} from "./refactoringLock"
+export {
+	type RefactorAndTagResult,
+	type RefactorAndTagOptions,
+	refactorAndTagMessage,
+} from "./messageRefactorer"
+export {
+	type GeneratePromptTagsResult,
+	type GeneratePromptTagsOptions,
+	generatePromptTags,
+} from "./promptTagger"
