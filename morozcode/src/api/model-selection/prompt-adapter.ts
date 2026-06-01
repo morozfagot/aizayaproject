@@ -123,8 +123,8 @@ export class PromptAdapter {
 		}
 
 		// Keep first and last paragraphs, summarize middle
-		const firstParagraph = paragraphs[0]
-		const lastParagraph = paragraphs[paragraphs.length - 1]
+		const firstParagraph = paragraphs[0] ?? ""
+		const lastParagraph = paragraphs[paragraphs.length - 1] ?? ""
 		const middleParagraphs = paragraphs.slice(1, -1)
 
 		// Calculate how much space we have for middle summary
@@ -211,7 +211,7 @@ export class PromptAdapter {
 		// Take first sentence from each paragraph
 		const sentences = paragraphs
 			.map((p) => {
-				const firstSentence = p.split(/[.!?]/)[0]
+				const firstSentence = p.split(/[.!?]/)[0] ?? ""
 				return firstSentence.trim()
 			})
 			.filter((s) => s.length > 0)

@@ -123,6 +123,7 @@ export class BenchmarkAggregator {
 		for (let i = 0; i < stats.length; i++) {
 			const source = this.sources[i]
 			const stat = stats[i]
+			if (!source || !stat) continue
 			if (stat.success) {
 				console.info(`[BenchmarkAggregator] ${source.name}: ${stat.entriesCount} entries`)
 			} else {

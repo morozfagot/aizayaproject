@@ -206,11 +206,14 @@ export function findChunksByAllTags(
 
 	// Шаг 1: Собираем кандидаты — chunk_id которые есть во ВСЕХ тегах промпта
 	const firstTag = promptTags.direct[0]
+	if (!firstTag) return []
 	const firstEntries = index.chunk_index[firstTag] ?? []
 	let candidates = new Set(firstEntries.map((e) => e.chunk_id))
 
 	for (let i = 1; i < promptTags.direct.length; i++) {
-		const tagEntries = index.chunk_index[promptTags.direct[i]] ?? []
+		const currentTag = promptTags.direct[i]
+		if (!currentTag) continue
+		const tagEntries = index.chunk_index[currentTag] ?? []
 		const tagChunks = new Set(tagEntries.map((e) => e.chunk_id))
 		candidates = new Set([...candidates].filter((c) => tagChunks.has(c)))
 	}
@@ -352,9 +355,12 @@ export async function readTagIndex({
 			if (parsed && parsed.version === 1 && typeof parsed.index === "object") {
 				if (parsed.chunk_index) {
 					for (const tag of Object.keys(parsed.chunk_index)) {
-						parsed.chunk_index[tag] = parsed.chunk_index[tag].map((entry: string | ChunkIndexEntry) =>
-							typeof entry === "string" ? { chunk_id: entry, weight: 0.5 } : entry,
-						)
+						const entries = parsed.chunk_index[tag]
+						if (entries) {
+							parsed.chunk_index[tag] = entries.map((entry: string | ChunkIndexEntry) =>
+								typeof entry === "string" ? { chunk_id: entry, weight: 0.5 } : entry,
+							)
+						}
 					}
 				} else {
 					parsed.chunk_index = {}

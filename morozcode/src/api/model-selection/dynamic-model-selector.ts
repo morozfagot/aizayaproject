@@ -187,7 +187,12 @@ export class DynamicModelSelector {
 	): ModelInfo {
 		const accuracyScore: Record<AccuracyLevel, number> = { low: 0.5, medium: 0.75, high: 1.0 }
 
-		let bestModel = candidates[0]
+		const firstCandidate = candidates[0]
+		if (!firstCandidate) {
+			throw new ModelOverloadError("No candidates available for optimization", analysis.taskType, analysis.estimatedTokens)
+		}
+
+		let bestModel: ModelInfo = firstCandidate
 		let bestEfficiency = -1
 
 		for (const model of candidates) {
