@@ -2,6 +2,9 @@ import { type ModelInfo } from "@roo-code/types"
 import { getOpenRouterModels } from "../providers/fetchers/openrouter"
 import type { ApiHandlerOptions } from "../../shared/api"
 import { type ModelSelectionConfig, type ComplexityLevel, type TaskType } from "./types"
+import { BenchmarkAggregator } from "./benchmark-aggregator"
+import type { AggregatedBenchmarks } from "./benchmark-aggregator"
+import { createBenchmarkSources } from "./benchmark-sources"
 
 const RANKING_CATEGORY_TO_TASK_TYPE: Record<string, TaskType> = {
 	"programming": "code",
@@ -193,15 +196,20 @@ function modelInfoToSelectionConfig(
 	}
 }
 
+/**
+ * ModelRegistry collects and caches available models from OpenRouter.
+ * Rankings are aggregated from multiple benchmark sources for objective evaluation.
+ */
 export class ModelRegistry {
 	private cache: ModelSelectionConfig[] | undefined
 	private cacheTimestamp = 0
 	private readonly ttlMs: number
-	private rankingsCache: Record<string, Record<string, number>> | undefined
-	private rankingsCacheTimestamp = 0
+	private readonly benchmarkAggregator: BenchmarkAggregator
 
-	constructor(ttlMs = 5 * 60 * 1000) {
+	constructor(ttlMs = 5 * 60 * 1000, aaApiKey?: string) {
 		this.ttlMs = ttlMs
+		const sources = createBenchmarkSources(fetchOpenRouterRankings, aaApiKey)
+		this.benchmarkAggregator = new BenchmarkAggregator(sources)
 	}
 
 	async getAvailableModels(options?: ApiHandlerOptions): Promise<ModelSelectionConfig[]> {
@@ -212,15 +220,23 @@ export class ModelRegistry {
 
 		const openRouterModels = await getOpenRouterModels(options)
 
-		if (!this.rankingsCache || now - this.rankingsCacheTimestamp > this.ttlMs * 2) {
-			this.rankingsCache = await fetchOpenRouterRankings()
-			this.rankingsCacheTimestamp = now
+		let aggregatedBenchmarks: AggregatedBenchmarks = {}
+		try {
+			const result = await this.benchmarkAggregator.getAggregatedBenchmarks()
+			aggregatedBenchmarks = result.benchmarks
+			const sourceInfo = result.sourceStats
+				.map((s) => `${s.name}: ${s.entriesCount} entries${s.success ? "" : " (FAILED)"}`)
+				.join(", ")
+			console.info(
+				`[ModelRegistry] Benchmarks aggregated from ${result.sourceStats.length} sources (${sourceInfo})${result.fromCache ? " [cached]" : ` in ${result.aggregationTimeMs}ms`}`,
+			)
+		} catch (err) {
+			console.warn("[ModelRegistry] Failed to aggregate benchmarks, using empty rankings:", err)
 		}
 
 		const configs: ModelSelectionConfig[] = []
-
 		for (const [id, info] of Object.entries(openRouterModels)) {
-			configs.push(modelInfoToSelectionConfig(id, info as ModelInfo, this.rankingsCache))
+			configs.push(modelInfoToSelectionConfig(id, info as ModelInfo, aggregatedBenchmarks))
 		}
 
 		this.cache = configs
@@ -230,6 +246,12 @@ export class ModelRegistry {
 
 	async refresh(options?: ApiHandlerOptions): Promise<ModelSelectionConfig[]> {
 		this.cache = undefined
+		return this.getAvailableModels(options)
+	}
+
+	async refreshAll(options?: ApiHandlerOptions): Promise<ModelSelectionConfig[]> {
+		this.cache = undefined
+		this.benchmarkAggregator.invalidateCache()
 		return this.getAvailableModels(options)
 	}
 
