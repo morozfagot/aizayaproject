@@ -1,324 +1,263 @@
 /**
- * Multi-Source Benchmark Sources
+ * Dynamic Model Selection — Benchmark Sources
  *
- * Агрегация бенчмарков из нескольких источников для более объективной оценки моделей.
- *
- * Источники:
- * 1. OpenRouter Rankings — уже реализован (categoryRankings)
- * 2. Artificial Analysis — https://artificialanalysis.ai/api/v2/data/llms/models
- * 3. LMSYS Chatbot Arena (через arena-ai-leaderboards) — https://api.wulong.dev/arena-ai-leaderboards/v1/leaderboard?name=text
- * 4. OpenLLM Leaderboard (HuggingFace) — заглушка для будущей интеграции
+ * Interfaces and implementations for fetching model rankings
+ * from multiple benchmark sources.
  */
 
-import type { TaskType } from "./types"
+import type { ModelRanking, BenchmarkWeights } from "./types"
 
-// =============================================================================
-// ИНТЕРФЕЙСЫ
-// =============================================================================
-
-export interface ModelRanking {
-	modelId: string
-	category: string
-	score: number
-	rank: number
-}
-
-export interface BenchmarkWeights {
-	openrouter: number
-	artificialAnalysis: number
-	lmsys: number
-	openllm: number
-}
-
+/**
+ * Default benchmark weights.
+ */
 export const DEFAULT_BENCHMARK_WEIGHTS: BenchmarkWeights = {
-	openrouter: 0.3,
+	openRouter: 0.3,
 	artificialAnalysis: 0.3,
 	lmsys: 0.3,
 	openllm: 0.1,
 }
 
+/**
+ * Unified interface for benchmark data sources.
+ */
 export interface BenchmarkSource {
+	/** Source name for logging */
 	readonly name: string
+	/** Fetch rankings from this source */
 	fetchRankings(): Promise<ModelRanking[]>
-	normalizeScore(score: number, maxPossible: number): number
+	/** Normalize a raw score to 0-100 scale */
+	normalizeScore(rawScore: number): number
 }
 
-// =============================================================================
-// МАППИНГ КАТЕГОРИЙ
-// =============================================================================
-
-const AA_CATEGORY_TO_TASK_TYPE: Record<string, TaskType> = {
-	artificial_analysis_intelligence_index: "general",
-	artificial_analysis_coding_index: "code",
-	artificial_analysis_math_index: "reasoning",
-	mmlu_pro: "general",
-	gpqa: "reasoning",
-	hle: "reasoning",
-	livecodebench: "code",
-	scicode: "code",
-	math_500: "reasoning",
-	aime: "reasoning",
-}
-
-const LMSYS_CATEGORY_TO_TASK_TYPE: Record<string, TaskType> = {
-	overall: "general",
-	code: "code",
-	math: "reasoning",
-	hard_prompt: "reasoning",
-	longer_query: "summarization",
-	multi_turn: "general",
-}
-
-// =============================================================================
-// ИСТОЧНИК 1: OPENROUTER RANKINGS
-// =============================================================================
-
+/**
+ * OpenRouter benchmark source.
+ * Uses existing OpenRouter rankings API.
+ */
 export class OpenRouterBenchmarkSource implements BenchmarkSource {
-	readonly name = "openrouter"
+	readonly name = "OpenRouter"
 
-	constructor(
-		private readonly fetchRankingsFn: () => Promise<Record<string, Record<string, number>>>,
-	) {}
+	constructor(private readonly apiKey?: string) {}
 
 	async fetchRankings(): Promise<ModelRanking[]> {
-		const rankings: ModelRanking[] = []
 		try {
-			const data = await this.fetchRankingsFn()
-			for (const [modelId, categories] of Object.entries(data)) {
-				for (const [category, rank] of Object.entries(categories)) {
+			const headers: Record<string, string> = {}
+			if (this.apiKey) {
+				headers["Authorization"] = `Bearer ${this.apiKey}`
+			}
+
+			const response = await fetch("https://openrouter.ai/api/v1/models", { headers })
+			if (!response.ok) {
+				console.warn(`[OpenRouterBenchmarkSource] HTTP ${response.status}: ${response.statusText}`)
+				return []
+			}
+
+			const data = (await response.json()) as { data: Array<{ id: string; context_length: number; pricing: { prompt: string; completion: string } }> }
+			const rankings: ModelRanking[] = []
+
+			for (const model of data.data || []) {
+				const promptPrice = parseFloat(model.pricing?.prompt || "0")
+				const completionPrice = parseFloat(model.pricing?.completion || "0")
+				// Use inverse of cost as score (cheaper = higher score)
+				const score = promptPrice > 0 ? Math.min(100, (0.01 / promptPrice) * 100) : 50
+
+				rankings.push({
+					modelId: model.id,
+					category: "general",
+					score: this.normalizeScore(score),
+					rank: 0, // Will be assigned after sorting
+				})
+			}
+
+			// Sort by score descending and assign ranks
+			rankings.sort((a, b) => b.score - a.score)
+			rankings.forEach((r, i) => { r.rank = i + 1 })
+
+			// Return top 200
+			return rankings.slice(0, 200)
+		} catch (error) {
+			console.warn(`[OpenRouterBenchmarkSource] Fetch failed:`, error)
+			return []
+		}
+	}
+
+	normalizeScore(rawScore: number): number {
+		return Math.min(100, Math.max(0, rawScore))
+	}
+}
+
+/**
+ * Artificial Analysis benchmark source.
+ * API v2: intelligence_index, coding_index, math_index, mmlu_pro, gpqa, etc.
+ */
+export class ArtificialAnalysisBenchmarkSource implements BenchmarkSource {
+	readonly name = "ArtificialAnalysis"
+
+	constructor(private readonly apiKey?: string) {}
+
+	async fetchRankings(): Promise<ModelRanking[]> {
+		if (!this.apiKey) {
+			console.warn("[ArtificialAnalysisBenchmarkSource] No API key provided, skipping")
+			return []
+		}
+
+		try {
+			const response = await fetch("https://artificialanalysis.ai/api/v2/data/llms/models", {
+				headers: {
+					"x-api-key": this.apiKey,
+				},
+			})
+
+			if (!response.ok) {
+				console.warn(`[ArtificialAnalysisBenchmarkSource] HTTP ${response.status}: ${response.statusText}`)
+				return []
+			}
+
+			const data = (await response.json()) as Array<{
+				id: string
+				intelligence_index?: number
+				coding_index?: number
+				math_index?: number
+				mmlu_pro?: number
+				gpqa?: number
+			}>
+
+			const rankings: ModelRanking[] = []
+
+			for (const model of data || []) {
+				// Use intelligence_index as primary score (0-100 scale)
+				const intelligenceScore = (model.intelligence_index || 0) * 100
+				const codingScore = (model.coding_index || 0) * 100
+				const mathScore = (model.math_index || 0) * 100
+
+				// General ranking
+				rankings.push({
+					modelId: model.id,
+					category: "general",
+					score: this.normalizeScore(intelligenceScore),
+					rank: 0,
+				})
+
+				// Code ranking
+				if (model.coding_index) {
 					rankings.push({
-						modelId: modelId.toLowerCase(),
-						category,
-						score: this.normalizeScore(rank, 500),
-						rank,
+						modelId: model.id,
+						category: "code",
+						score: this.normalizeScore(codingScore),
+						rank: 0,
 					})
 				}
-			}
-		} catch (err) {
-			console.warn("[OpenRouterBenchmarkSource] Failed to fetch rankings:", err)
-		}
-		return rankings
-	}
 
-	normalizeScore(score: number, maxPossible: number): number {
-		const normalized = 1 - (score - 1) / (maxPossible - 1)
-		return Math.max(0, Math.min(1, normalized))
-	}
-}
-
-// =============================================================================
-// ИСТОЧНИК 2: ARTIFICIAL ANALYSIS
-// =============================================================================
-
-interface AAModelEvaluation {
-	artificial_analysis_intelligence_index?: number
-	artificial_analysis_coding_index?: number
-	artificial_analysis_math_index?: number
-	mmlu_pro?: number
-	gpqa?: number
-	hle?: number
-	livecodebench?: number
-	scicode?: number
-	math_500?: number
-	aime?: number
-}
-
-interface AAModelEntry {
-	id: string
-	name: string
-	slug: string
-	evaluations?: AAModelEvaluation
-}
-
-interface AAResponse {
-	status: number
-	data: AAModelEntry[]
-}
-
-function normalizeAAModelName(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9\s-]/g, "")
-		.replace(/\s+/g, "-")
-		.replace(/-+/g, "-")
-		.replace(/^-|-$/g, "")
-}
-
-interface AAMetricMapping {
-	category: string
-	maxScore: number
-}
-
-const AA_METRIC_MAPPINGS: Record<string, AAMetricMapping> = {
-	artificial_analysis_intelligence_index: { category: "general", maxScore: 100 },
-	artificial_analysis_coding_index: { category: "code", maxScore: 100 },
-	artificial_analysis_math_index: { category: "reasoning", maxScore: 100 },
-	mmlu_pro: { category: "general", maxScore: 1 },
-	gpqa: { category: "reasoning", maxScore: 1 },
-	hle: { category: "reasoning", maxScore: 1 },
-	livecodebench: { category: "code", maxScore: 1 },
-	scicode: { category: "code", maxScore: 1 },
-	math_500: { category: "reasoning", maxScore: 1 },
-	aime: { category: "reasoning", maxScore: 1 },
-}
-
-export class ArtificialAnalysisBenchmarkSource implements BenchmarkSource {
-	readonly name = "artificial_analysis"
-	private readonly apiKey: string | undefined
-	private readonly baseUrl = "https://artificialanalysis.ai/api/v2"
-
-	constructor(apiKey?: string) {
-		this.apiKey = apiKey
-	}
-
-	async fetchRankings(): Promise<ModelRanking[]> {
-		const rankings: ModelRanking[] = []
-		try {
-			const headers: Record<string, string> = { "Content-Type": "application/json" }
-			if (this.apiKey) {
-				headers["x-api-key"] = this.apiKey
-			}
-
-			const response = await fetch(`${this.baseUrl}/data/llms/models`, { headers })
-			if (!response.ok) {
-				console.warn(`[ArtificialAnalysis] API returned ${response.status}`)
-				return rankings
-			}
-
-			const data: AAResponse = await response.json()
-			if (!data.data || !Array.isArray(data.data)) return rankings
-
-			for (const model of data.data) {
-				const modelId = normalizeAAModelName(model.name)
-				const evaluations = model.evaluations
-				if (!evaluations) continue
-
-				for (const [metricName, mapping] of Object.entries(AA_METRIC_MAPPINGS)) {
-					const rawScore = evaluations[metricName as keyof AAModelEvaluation]
-					if (rawScore == null) continue
-
+				// Math/Reasoning ranking
+				if (model.math_index) {
 					rankings.push({
-						modelId,
-						category: mapping.category,
-						score: this.normalizeScore(rawScore, mapping.maxScore),
+						modelId: model.id,
+						category: "reasoning",
+						score: this.normalizeScore(mathScore),
 						rank: 0,
 					})
 				}
 			}
-		} catch (err) {
-			console.warn("[ArtificialAnalysis] Failed to fetch rankings:", err)
+
+			// Sort and assign ranks per category
+			const categories = [...new Set(rankings.map((r) => r.category))]
+			for (const category of categories) {
+				const categoryRankings = rankings.filter((r) => r.category === category)
+				categoryRankings.sort((a, b) => b.score - a.score)
+				categoryRankings.forEach((r, i) => { r.rank = i + 1 })
+			}
+
+			return rankings.slice(0, 200)
+		} catch (error) {
+			console.warn(`[ArtificialAnalysisBenchmarkSource] Fetch failed:`, error)
+			return []
 		}
-		return rankings
 	}
 
-	normalizeScore(score: number, maxPossible: number): number {
-		return Math.max(0, Math.min(1, score / maxPossible))
+	normalizeScore(rawScore: number): number {
+		// AA scores are already 0-100
+		return Math.min(100, Math.max(0, rawScore))
 	}
 }
 
-// =============================================================================
-// ИСТОЧНИК 3: LMSYS CHATBOT ARENA
-// =============================================================================
-
-interface LMSYSModelEntry {
-	rank: number
-	model: string
-	vendor?: string
-	score: number | null
-	ci?: number | null
-	votes?: number | null
-}
-
-interface LMSYSLeaderboardResponse {
-	meta: { leaderboard: string; fetched_at: string; model_count: number }
-	models: LMSYSModelEntry[]
-}
-
-const LMSYS_CATEGORIES = [
-	{ name: "text", taskType: "general" as TaskType },
-	{ name: "code", taskType: "code" as TaskType },
-	{ name: "math", taskType: "reasoning" as TaskType },
-]
-
-function normalizeLMSYSModelName(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/\s*\([^)]*\)\s*/g, "")
-		.replace(/[^a-z0-9\s-]/g, "")
-		.replace(/\s+/g, "-")
-		.replace(/-+/g, "-")
-		.replace(/^-|-$/g, "")
-}
-
+/**
+ * LMSYS Chatbot Arena benchmark source.
+ * Uses arena-ai-leaderboards API for text/code/math Elo ratings.
+ */
 export class LMSYSBenchmarkSource implements BenchmarkSource {
-	readonly name = "lmsys"
-	private readonly baseUrl = "https://api.wulong.dev/arena-ai-leaderboards/v1"
+	readonly name = "LMSYS"
+
+	private readonly categories = ["text", "code", "math"]
 
 	async fetchRankings(): Promise<ModelRanking[]> {
-		const rankings: ModelRanking[] = []
+		const allRankings: ModelRanking[] = []
 
-		for (const category of LMSYS_CATEGORIES) {
+		for (const category of this.categories) {
 			try {
-				const response = await fetch(`${this.baseUrl}/leaderboard?name=${category.name}`)
-				if (!response.ok) continue
+				const response = await fetch(
+					`https://api.wulong.dev/arena-ai-leaderboards/v1/leaderboard?name=${category}`
+				)
 
-				const data: LMSYSLeaderboardResponse = await response.json()
-				if (!data.models || !Array.isArray(data.models)) continue
+				if (!response.ok) {
+					console.warn(`[LMSYSBenchmarkSource] HTTP ${response.status} for ${category}`)
+					continue
+				}
 
-				const eloScores = data.models.map((m) => m.score).filter((s): s is number => s != null)
-				if (eloScores.length === 0) continue
+				const data = (await response.json()).data as Array<{
+					model: string
+					elo: number
+					rank: number
+					ci: string
+					votes: number
+				}>
 
-				const maxElo = Math.max(...eloScores)
-				const minElo = Math.min(...eloScores)
-				const eloRange = maxElo - minElo || 1
+				for (const entry of data || []) {
+					// Normalize Elo to 0-100 scale (assuming max Elo ~1400)
+					const normalizedScore = this.normalizeScore((entry.elo / 1400) * 100)
 
-				for (const model of data.models) {
-					if (model.score == null) continue
-					rankings.push({
-						modelId: normalizeLMSYSModelName(model.model),
-						category: category.taskType,
-						score: this.normalizeScore(model.score - minElo, eloRange),
-						rank: model.rank,
+					allRankings.push({
+						modelId: entry.model,
+						category: category === "text" ? "general" : category,
+						score: normalizedScore,
+						rank: entry.rank,
 					})
 				}
-			} catch (err) {
-				console.warn(`[LMSYS] Failed to fetch category "${category.name}":`, err)
+			} catch (error) {
+				console.warn(`[LMSYSBenchmarkSource] Fetch failed for ${category}:`, error)
 			}
 		}
-		return rankings
+
+		return allRankings.slice(0, 200)
 	}
 
-	normalizeScore(score: number, maxPossible: number): number {
-		return Math.max(0, Math.min(1, score / maxPossible))
+	normalizeScore(rawScore: number): number {
+		return Math.min(100, Math.max(0, rawScore))
 	}
 }
 
-// =============================================================================
-// ИСТОЧНИК 4: OPENLLM LEADERBOARD (заглушка)
-// =============================================================================
-
+/**
+ * OpenLLM benchmark source (HuggingFace).
+ * Stub implementation — returns empty array.
+ */
 export class OpenLLMBenchmarkSource implements BenchmarkSource {
-	readonly name = "openllm"
+	readonly name = "OpenLLM"
 
 	async fetchRankings(): Promise<ModelRanking[]> {
+		// Stub: OpenLLM integration not yet implemented
+		console.info("[OpenLLMBenchmarkSource] Stub — returning empty rankings")
 		return []
 	}
 
-	normalizeScore(score: number, maxPossible: number): number {
-		return Math.max(0, Math.min(1, score / maxPossible))
+	normalizeScore(): number {
+		return 0
 	}
 }
 
-// =============================================================================
-// ФАБРИКА
-// =============================================================================
-
-export function createBenchmarkSources(
-	openRouterFetchFn: () => Promise<Record<string, Record<string, number>>>,
-	aaApiKey?: string,
-): BenchmarkSource[] {
+/**
+ * Factory function to create all benchmark sources.
+ */
+export function createBenchmarkSources(aaApiKey?: string): BenchmarkSource[] {
 	return [
-		new OpenRouterBenchmarkSource(openRouterFetchFn),
+		new OpenRouterBenchmarkSource(),
 		new ArtificialAnalysisBenchmarkSource(aaApiKey),
 		new LMSYSBenchmarkSource(),
 		new OpenLLMBenchmarkSource(),

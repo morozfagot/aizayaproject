@@ -1,200 +1,267 @@
-import {
-	type ModelSelectionConfig,
-	type PromptAnalysis,
-	type ModelSelectionResult,
-	type ModelSelectionOptions,
-	ModelOverloadError,
+/**
+ * Dynamic Model Selection — Dynamic Model Selector
+ *
+ * Selects the most efficient model for a given prompt
+ * using multi-criteria filtering and cost optimization.
+ */
+
+import type {
+	ModelInfo,
+	ModelSelectionConfig,
+	ModelSelectionResult,
+	PromptAnalysis,
+	TaskType,
+	AccuracyLevel,
 } from "./types"
-import { ModelRegistry, complexityGte } from "./model-registry"
-import { PromptAnalyzer } from "./prompt-analyzer"
-import { estimateTokenCount, shrinkPrompt } from "./prompt-adapter"
+import { PromptAnalyzer, type CDI, type ModelAwareAnalysis } from "./prompt-analyzer"
+import { PromptAdapter, type PromptAdaptationResult } from "./prompt-adapter"
 
-export class DynamicModelSelector {
-	private registry: ModelRegistry
-	private analyzer: PromptAnalyzer
-
-	constructor(registry: ModelRegistry, analyzer: PromptAnalyzer) {
-		this.registry = registry
-		this.analyzer = analyzer
-	}
-
-	async select(
-		enrichedPrompt: string,
-		options?: ModelSelectionOptions,
-	): Promise<ModelSelectionResult> {
-		const allModels = await this.registry.getAvailableModels()
-		console.log(`[DynamicModelSelector] availableModels=`, allModels.length)
-
-		const modelAwareResult = await this.analyzer.analyzeWithModelAwareness(enrichedPrompt, allModels)
-		const analysis = modelAwareResult.analysis
-		let promptTokens = estimateTokenCount(modelAwareResult.adaptedPrompt || enrichedPrompt)
-		let adaptedPrompt = modelAwareResult.adaptedPrompt
-
-		console.log(`[DynamicModelSelector] analysis=`, analysis, `promptTokens=`, promptTokens, `cdi=`, modelAwareResult.cdi)
-
-		let candidates = this.filterModels(allModels, analysis, promptTokens, options)
-		console.log(`[DynamicModelSelector] candidates after filter=`, candidates.length)
-
-		if (candidates.length > 0) {
-			const model = this.pickMostEfficient(candidates, promptTokens, analysis.estimatedOutputTokens, analysis.complexity, analysis.taskType)
-			console.log(`[DynamicModelSelector] selected without adaptation:`, model.id)
-			return { model, temperature: analysis.temperature, adaptedPrompt }
-		}
-
-		if (!adaptedPrompt) {
-			const capabilityMatches = this.filterByCapability(allModels, analysis, options)
-			console.log(`[DynamicModelSelector] capabilityMatches=`, capabilityMatches.length)
-
-			if (capabilityMatches.length > 0) {
-				const mostEfficient = this.pickMostEfficient(capabilityMatches, promptTokens, analysis.estimatedOutputTokens, analysis.complexity)
-				const targetTokens = Math.floor(mostEfficient.contextWindow * 0.9)
-
-				if (targetTokens < promptTokens) {
-					adaptedPrompt = shrinkPrompt(enrichedPrompt, { targetTokens, strategy: "middle" })
-					const adaptedTokens = estimateTokenCount(adaptedPrompt)
-					console.log(`[DynamicModelSelector] shrink to most efficient model context=${mostEfficient.contextWindow} adaptedTokens=${adaptedTokens}`)
-
-					candidates = this.filterModels(allModels, analysis, adaptedTokens, options)
-					if (candidates.length > 0) {
-						const model = this.pickMostEfficient(candidates, adaptedTokens, analysis.estimatedOutputTokens, analysis.complexity, analysis.taskType)
-						console.log(`[DynamicModelSelector] selected after shrink:`, model.id)
-						return { model, temperature: analysis.temperature, adaptedPrompt }
-					}
-				}
-			}
-		} else {
-			console.log(`[DynamicModelSelector] CDI already shrunk prompt but no candidates found`)
-		}
-
-		throw new ModelOverloadError({
-			promptTokens,
-			complexity: analysis.complexity,
-			taskType: analysis.taskType,
-			attemptedShrink: true,
-			availableModelsCount: allModels.filter((m) => m.availability).length,
-		})
-	}
-
-	private filterModels(
-		models: ModelSelectionConfig[],
-		analysis: PromptAnalysis,
-		promptTokens: number,
-		options?: ModelSelectionOptions,
-	): ModelSelectionConfig[] {
-		return models.filter((m) => {
-			if (!m.availability) return false
-			if (options?.preferredProvider && m.apiProvider !== options.preferredProvider) return false
-			if (!complexityGte(m.accuracyLevel, analysis.complexity)) return false
-			if (!complexityGte(m.complexityHandling, analysis.complexity)) return false
-			if (!m.taskTypeSuitability.includes(analysis.taskType)) return false
-			const effectiveLimit = m.effectiveContextLimit ?? Math.floor(m.contextWindow * 0.70)
-			if (effectiveLimit < promptTokens) return false
-
-			if (m.categoryRankings && m.categoryRankings[analysis.taskType] !== undefined) {
-				if (m.categoryRankings[analysis.taskType] > 200) return false
-			}
-
-			if (options?.budgetLimit !== undefined) {
-				const estimatedCost =
-					(promptTokens * m.inputPrice + analysis.estimatedOutputTokens * m.outputPrice) / 1_000_000
-				if (estimatedCost > options.budgetLimit) return false
-			}
-			return true
-		})
-	}
-
-	private filterByCapability(
-		models: ModelSelectionConfig[],
-		analysis: PromptAnalysis,
-		options?: ModelSelectionOptions,
-	): ModelSelectionConfig[] {
-		return models.filter((m) => {
-			if (!m.availability) return false
-			if (options?.preferredProvider && m.apiProvider !== options.preferredProvider) return false
-			if (!complexityGte(m.accuracyLevel, analysis.complexity)) return false
-			if (!complexityGte(m.complexityHandling, analysis.complexity)) return false
-			if (!m.taskTypeSuitability.includes(analysis.taskType)) return false
-			if (options?.budgetLimit !== undefined) {
-				const estimatedCost =
-					(m.contextWindow * m.inputPrice + analysis.estimatedOutputTokens * m.outputPrice) / 1_000_000
-				if (estimatedCost > options.budgetLimit) return false
-			}
-			return true
-		})
-	}
-
-	private pickMostEfficient(
-		candidates: ModelSelectionConfig[],
-		inputTokens: number,
-		outputTokens: number,
-		complexity: PromptAnalysis["complexity"],
-		taskType?: string,
-	): ModelSelectionConfig {
-		const complexityScore = this.complexityToScore(complexity)
-
-		return candidates.reduce((best, current) => {
-			const bestCost = inputTokens * best.inputPrice + outputTokens * best.outputPrice
-			const currentCost = inputTokens * current.inputPrice + outputTokens * current.outputPrice
-
-			const bestAccuracyScore = this.complexityToScore(best.accuracyLevel)
-			const currentAccuracyScore = this.complexityToScore(current.accuracyLevel)
-
-			const bestEfficiency = this.calculateEfficiency(bestAccuracyScore, bestCost, complexityScore)
-			const currentEfficiency = this.calculateEfficiency(currentAccuracyScore, currentCost, complexityScore)
-
-			const bestRank = taskType ? best.categoryRankings?.[taskType] ?? Infinity : Infinity
-			const currentRank = taskType ? current.categoryRankings?.[taskType] ?? Infinity : Infinity
-
-			const efficiencyDiff = Math.abs(currentEfficiency - bestEfficiency) / Math.max(bestEfficiency, 0.0001)
-			if (efficiencyDiff < 0.1) {
-				return currentRank < bestRank ? current : best
-			}
-
-			return currentEfficiency > bestEfficiency ? current : best
-		})
-	}
-
-	private calculateEfficiency(accuracyScore: number, cost: number, complexityScore: number): number {
-		const matchPenalty = Math.abs(accuracyScore - complexityScore)
-		const denominator = cost * (matchPenalty === 0 ? 0.01 : matchPenalty)
-		const safeDenominator = Math.max(denominator, 0.0001)
-		return accuracyScore / safeDenominator
-	}
-
-	private complexityToScore(level: PromptAnalysis["complexity"]): number {
-		switch (level) {
-			case "low":
-				return 1
-			case "medium":
-				return 2
-			case "high":
-				return 3
-			case "very_high":
-				return 4
-			default:
-				return 2
-		}
-	}
-
-	private findMaxContextModel(
-		models: ModelSelectionConfig[],
-		analysis: PromptAnalysis,
-		options?: ModelSelectionOptions,
-	): ModelSelectionConfig | undefined {
-		return this.filterByCapability(models, analysis, options)
-			.reduce<ModelSelectionConfig | undefined>((max, m) => {
-				if (!max || m.contextWindow > max.contextWindow) return m
-				return max
-			}, undefined)
+/**
+ * Error thrown when all models are overloaded or unavailable.
+ */
+export class ModelOverloadError extends Error {
+	constructor(
+		message: string,
+		public readonly taskType: TaskType,
+		public readonly estimatedTokens: number
+	) {
+		super(message)
+		this.name = "ModelOverloadError"
 	}
 }
 
-export async function dynamicModelSelection(
-	enrichedPrompt: string,
-	registry: ModelRegistry,
-	analyzer: PromptAnalyzer,
-	options?: ModelSelectionOptions,
-): Promise<ModelSelectionResult> {
-	const selector = new DynamicModelSelector(registry, analyzer)
-	return selector.select(enrichedPrompt, options)
+/**
+ * Dynamic model selector with multi-criteria optimization.
+ */
+export class DynamicModelSelector {
+	private readonly analyzer: PromptAnalyzer
+	private readonly adapter: PromptAdapter
+
+	constructor() {
+		this.analyzer = new PromptAnalyzer()
+		this.adapter = new PromptAdapter()
+	}
+
+	/**
+	 * Pick the most efficient model for the given prompt.
+	 * Uses Formula B: efficiency = (accuracy * benchmark_score) / cost
+	 *
+	 * @param prompt The prompt to analyze
+	 * @param availableModels List of available models
+	 * @param config Selection configuration
+	 * @param contextMessages Optional context messages for CDI calculation
+	 * @returns Selected model and adaptation info
+	 * @throws ModelOverloadError if no suitable model found
+	 */
+	pickMostEfficient(
+		prompt: string,
+		availableModels: ModelInfo[],
+		config: ModelSelectionConfig,
+		contextMessages?: string[]
+	): ModelSelectionResult {
+		if (!config.enabled) {
+			return this.createFallbackResult(availableModels, config)
+		}
+
+		// Step 1: Analyze prompt with model awareness (includes CDI)
+		const analysis = this.analyzer.analyzeWithModelAwareness(
+			prompt,
+			availableModels,
+			contextMessages
+		)
+
+		// Step 2: Filter by accuracy, complexity, task type, availability
+		let candidates = this.filterByCriteria(availableModels, analysis, config)
+
+		// Step 3: Filter by token limit (considering CDI)
+		candidates = this.filterByTokenLimit(candidates, analysis)
+
+		// Step 4: If no candidates, try prompt adaptation
+		if (candidates.length === 0 && config.allowPromptAdaptation) {
+			return this.tryWithAdaptation(prompt, availableModels, analysis, config, contextMessages)
+		}
+
+		// Step 5: If still no candidates, throw ModelOverloadError
+		if (candidates.length === 0) {
+			throw new ModelOverloadError(
+				`No suitable model found for task type "${analysis.taskType}" with ${analysis.estimatedTokens} tokens`,
+				analysis.taskType,
+				analysis.estimatedTokens
+			)
+		}
+
+		// Step 6: Optimize by cost using Formula B
+		const selected = this.optimizeByEfficiency(candidates, analysis, config)
+
+		return {
+			model: selected,
+			promptAdapted: false,
+			selectionReason: this.buildSelectionReason(selected, analysis),
+		}
+	}
+
+	/**
+	 * Filter models by accuracy, complexity, task type, and availability.
+	 */
+	private filterByCriteria(
+		models: ModelInfo[],
+		analysis: ModelAwareAnalysis,
+		config: ModelSelectionConfig
+	): ModelInfo[] {
+		const accuracyRank: Record<AccuracyLevel, number> = { low: 1, medium: 2, high: 3 }
+		const minAccuracyRank = accuracyRank[config.minAccuracy]
+
+		return models.filter((model) => {
+			// Must be available
+			if (!model.available) return false
+
+			// Must meet minimum accuracy
+			if (accuracyRank[model.accuracyLevel] < minAccuracyRank) return false
+
+			// Must support the task type
+			if (!model.taskTypeSuitability.includes(analysis.taskType)) return false
+
+			// Must handle the complexity
+			if (!this.canHandleComplexity(model, analysis.complexity)) return false
+
+			return true
+		})
+	}
+
+	/**
+	 * Filter models by token limit, considering CDI.
+	 */
+	private filterByTokenLimit(
+		models: ModelInfo[],
+		analysis: ModelAwareAnalysis
+	): ModelInfo[] {
+		return models.filter((model) => {
+			// Use effective context limit if CDI is available
+			const effectiveLimit = analysis.effectiveContextLimit || model.maxTokens
+			return effectiveLimit >= analysis.estimatedTokens
+		})
+	}
+
+	/**
+	 * Try prompt adaptation when no model fits.
+	 */
+	private tryWithAdaptation(
+		prompt: string,
+		availableModels: ModelInfo[],
+		analysis: ModelAwareAnalysis,
+		config: ModelSelectionConfig,
+		contextMessages?: string[]
+	): ModelSelectionResult {
+		// Find the model with the largest context window
+		const sortedByContext = [...availableModels].sort((a, b) => b.maxTokens - a.maxTokens)
+		const bestModel = sortedByContext[0]
+
+		if (!bestModel) {
+			throw new ModelOverloadError(
+				"No models available for prompt adaptation",
+				analysis.taskType,
+				analysis.estimatedTokens
+			)
+		}
+
+		// Adapt the prompt
+		const adaptation = this.adapter.adapt(prompt, analysis, bestModel.maxTokens)
+
+		return {
+			model: bestModel,
+			promptAdapted: true,
+			originalTokens: adaptation.originalTokens,
+			adaptedTokens: adaptation.adaptedTokens,
+			selectionReason: `Prompt adapted (${adaptation.method}) to fit ${bestModel.name}`,
+		}
+	}
+
+	/**
+	 * Optimize model selection using Formula B.
+	 * Formula B: efficiency = (accuracy * benchmark_score) / cost
+	 */
+	private optimizeByEfficiency(
+		candidates: ModelInfo[],
+		analysis: ModelAwareAnalysis,
+		config: ModelSelectionConfig
+	): ModelInfo {
+		const accuracyScore: Record<AccuracyLevel, number> = { low: 0.5, medium: 0.75, high: 1.0 }
+
+		let bestModel = candidates[0]
+		let bestEfficiency = -1
+
+		for (const model of candidates) {
+			// Get benchmark score from category rankings (lower rank = higher score)
+			const rank = model.categoryRankings?.[analysis.taskType] || 100
+			const benchmarkScore = Math.max(0, 1 - rank / 200) // Convert rank to 0-1 score
+
+			// Calculate total cost (input + expected output)
+			const expectedOutputTokens = Math.min(analysis.estimatedTokens * 0.5, 4096)
+			const totalCost =
+				analysis.estimatedTokens * model.costPerTokenInput +
+				expectedOutputTokens * model.costPerTokenOutput
+
+			// Formula B: efficiency = (accuracy * benchmark_score) / cost
+			const efficiency = totalCost > 0
+				? (accuracyScore[model.accuracyLevel] * benchmarkScore) / totalCost
+				: 0
+
+			// Apply category ranking bonus from config
+			const configRank = config.categoryRankings?.[analysis.taskType]?.[model.modelId]
+			const rankBonus = configRank ? (200 - configRank) / 200 : 0
+
+			const adjustedEfficiency = efficiency * (1 + rankBonus)
+
+			if (adjustedEfficiency > bestEfficiency) {
+				bestEfficiency = adjustedEfficiency
+				bestModel = model
+			}
+		}
+
+		return bestModel
+	}
+
+	/**
+	 * Check if a model can handle the given complexity.
+	 */
+	private canHandleComplexity(
+		model: ModelInfo,
+		complexity: string
+	): boolean {
+		const complexityRank: Record<string, number> = { simple: 1, moderate: 2, complex: 3 }
+		const modelRank = complexityRank[model.complexityHandling] || 1
+		const requiredRank = complexityRank[complexity] || 1
+		return modelRank >= requiredRank
+	}
+
+	/**
+	 * Create a fallback result when selection is disabled.
+	 */
+	private createFallbackResult(
+		availableModels: ModelInfo[],
+		config: ModelSelectionConfig
+	): ModelSelectionResult {
+		const fallback = config.fallbackModelId
+			? availableModels.find((m) => m.modelId === config.fallbackModelId)
+			: availableModels.find((m) => m.available)
+
+		if (!fallback) {
+			throw new ModelOverloadError("No fallback model available", "general", 0)
+		}
+
+		return {
+			model: fallback,
+			promptAdapted: false,
+			selectionReason: "Using fallback model (selection disabled)",
+		}
+	}
+
+	/**
+	 * Build a human-readable selection reason.
+	 */
+	private buildSelectionReason(model: ModelInfo, analysis: ModelAwareAnalysis): string {
+		const rank = model.categoryRankings?.[analysis.taskType]
+		const rankInfo = rank ? ` (rank #${rank})` : ""
+		return `Selected ${model.name}${rankInfo} for ${analysis.taskType} task`
+	}
 }

@@ -23,7 +23,17 @@ import {
 	mimoModels,
 } from "./providers/index.js"
 
+/**
+ * constants
+ */
+
 export const DEFAULT_CONSECUTIVE_MISTAKE_LIMIT = 3
+
+/**
+ * DynamicProvider
+ *
+ * Dynamic provider requires external API calls in order to get the model list.
+ */
 
 export const dynamicProviders = [
 	"openrouter",
@@ -41,11 +51,24 @@ export type DynamicProvider = (typeof dynamicProviders)[number]
 export const isDynamicProvider = (key: string): key is DynamicProvider =>
 	dynamicProviders.includes(key as DynamicProvider)
 
+/**
+ * LocalProvider
+ *
+ * Local providers require localhost API calls in order to get the model list.
+ */
+
 export const localProviders = ["ollama", "lmstudio"] as const
 
 export type LocalProvider = (typeof localProviders)[number]
 
 export const isLocalProvider = (key: string): key is LocalProvider => localProviders.includes(key as LocalProvider)
+
+/**
+ * InternalProvider
+ *
+ * Internal providers require internal VSCode API calls in order to get the
+ * model list.
+ */
 
 export const internalProviders = ["vscode-lm"] as const
 
@@ -54,17 +77,34 @@ export type InternalProvider = (typeof internalProviders)[number]
 export const isInternalProvider = (key: string): key is InternalProvider =>
 	internalProviders.includes(key as InternalProvider)
 
+/**
+ * CustomProvider
+ *
+ * Custom providers are completely configurable within Roo Code settings.
+ */
+
 export const customProviders = ["openai"] as const
 
 export type CustomProvider = (typeof customProviders)[number]
 
 export const isCustomProvider = (key: string): key is CustomProvider => customProviders.includes(key as CustomProvider)
 
+/**
+ * FauxProvider
+ *
+ * Faux providers do not make external inference calls and therefore do not have
+ * model lists.
+ */
+
 export const fauxProviders = ["fake-ai"] as const
 
 export type FauxProvider = (typeof fauxProviders)[number]
 
 export const isFauxProvider = (key: string): key is FauxProvider => fauxProviders.includes(key as FauxProvider)
+
+/**
+ * ProviderName
+ */
 
 export const providerNames = [
 	...dynamicProviders,
@@ -99,6 +139,10 @@ export type ProviderName = z.infer<typeof providerNamesSchema>
 export const isProviderName = (key: unknown): key is ProviderName =>
 	typeof key === "string" && providerNames.includes(key as ProviderName)
 
+/**
+ * RetiredProviderName
+ */
+
 export const retiredProviderNames = [
 	"cerebras",
 	"chutes",
@@ -122,6 +166,10 @@ export const providerNamesWithRetiredSchema = z.union([providerNamesSchema, reti
 
 export type ProviderNameWithRetired = z.infer<typeof providerNamesWithRetiredSchema>
 
+/**
+ * ProviderSettingsEntry
+ */
+
 export const providerSettingsEntrySchema = z.object({
 	id: z.string(),
 	name: z.string(),
@@ -131,21 +179,31 @@ export const providerSettingsEntrySchema = z.object({
 
 export type ProviderSettingsEntry = z.infer<typeof providerSettingsEntrySchema>
 
+/**
+ * ProviderSettings
+ */
+
 const baseProviderSettingsSchema = z.object({
 	includeMaxTokens: z.boolean().optional(),
 	todoListEnabled: z.boolean().optional(),
 	modelTemperature: z.number().nullish(),
 	rateLimitSeconds: z.number().optional(),
 	consecutiveMistakeLimit: z.number().min(0).optional(),
+
+	// Model reasoning.
 	enableReasoningEffort: z.boolean().optional(),
 	reasoningEffort: reasoningEffortSettingSchema.optional(),
 	modelMaxTokens: z.number().optional(),
 	modelMaxThinkingTokens: z.number().optional(),
+
+	// Model verbosity.
 	verbosity: verbosityLevelsSchema.optional(),
-	// Multi-Source Benchmarks — Artificial Analysis API key.
+
+	// Artificial Analysis API key for benchmark integration.
 	artificialAnalysisApiKey: z.string().optional(),
 })
 
+// Several of the providers share common model config properties.
 const apiModelIdProviderModelSchema = baseProviderSettingsSchema.extend({
 	apiModelId: z.string().optional(),
 })
@@ -154,7 +212,7 @@ const anthropicSchema = apiModelIdProviderModelSchema.extend({
 	apiKey: z.string().optional(),
 	anthropicBaseUrl: z.string().optional(),
 	anthropicUseAuthToken: z.boolean().optional(),
-	anthropicBeta1MContext: z.boolean().optional(),
+	anthropicBeta1MContext: z.boolean().optional(), // Enable 'context-1m-2025-08-07' beta for 1M context window.
 })
 
 const openRouterSchema = baseProviderSettingsSchema.extend({
@@ -170,7 +228,7 @@ const bedrockSchema = apiModelIdProviderModelSchema.extend({
 	awsSessionToken: z.string().optional(),
 	awsRegion: z.string().optional(),
 	awsUseCrossRegionInference: z.boolean().optional(),
-	awsUseGlobalInference: z.boolean().optional(),
+	awsUseGlobalInference: z.boolean().optional(), // Enable Global Inference profile routing when supported
 	awsUsePromptCache: z.boolean().optional(),
 	awsProfile: z.string().optional(),
 	awsUseProfile: z.boolean().optional(),
@@ -180,8 +238,8 @@ const bedrockSchema = apiModelIdProviderModelSchema.extend({
 	awsModelContextWindow: z.number().optional(),
 	awsBedrockEndpointEnabled: z.boolean().optional(),
 	awsBedrockEndpoint: z.string().optional(),
-	awsBedrock1MContext: z.boolean().optional(),
-	awsBedrockServiceTier: z.enum(["STANDARD", "FLEX", "PRIORITY"]).optional(),
+	awsBedrock1MContext: z.boolean().optional(), // Enable 'context-1m-2025-08-07' beta for 1M context window.
+	awsBedrockServiceTier: z.enum(["STANDARD", "FLEX", "PRIORITY"]).optional(), // AWS Bedrock service tier selection
 })
 
 const vertexSchema = apiModelIdProviderModelSchema.extend({
@@ -189,7 +247,7 @@ const vertexSchema = apiModelIdProviderModelSchema.extend({
 	vertexJsonCredentials: z.string().optional(),
 	vertexProjectId: z.string().optional(),
 	vertexRegion: z.string().optional(),
-	vertex1MContext: z.boolean().optional(),
+	vertex1MContext: z.boolean().optional(), // Enable 'context-1m-2025-08-07' beta for 1M context window.
 })
 
 const openAiSchema = baseProviderSettingsSchema.extend({
@@ -201,7 +259,7 @@ const openAiSchema = baseProviderSettingsSchema.extend({
 	openAiUseAzure: z.boolean().optional(),
 	azureApiVersion: z.string().optional(),
 	openAiStreamingEnabled: z.boolean().optional(),
-	openAiHostHeader: z.string().optional(),
+	openAiHostHeader: z.string().optional(), // Keep temporarily for backward compatibility during migration.
 	openAiHeaders: z.record(z.string(), z.string()).optional(),
 })
 
@@ -240,11 +298,15 @@ const geminiCliSchema = apiModelIdProviderModelSchema.extend({
 	geminiCliProjectId: z.string().optional(),
 })
 
-const openAiCodexSchema = apiModelIdProviderModelSchema.extend({})
+const openAiCodexSchema = apiModelIdProviderModelSchema.extend({
+	// No additional settings needed - uses OAuth authentication
+})
 
 const openAiNativeSchema = apiModelIdProviderModelSchema.extend({
 	openAiNativeApiKey: z.string().optional(),
 	openAiNativeBaseUrl: z.string().optional(),
+	// OpenAI Responses API service tier for openai-native provider only.
+	// UI should only expose this when the selected model supports flex/priority.
 	openAiNativeServiceTier: serviceTierSchema.optional(),
 })
 
@@ -435,6 +497,10 @@ export type ProviderSettingsWithId = z.infer<typeof providerSettingsWithIdSchema
 
 export const PROVIDER_SETTINGS_KEYS = providerSettingsSchema.keyof().options
 
+/**
+ * ModelIdKey
+ */
+
 export const modelIdKeys = [
 	"apiModelId",
 	"openRouterModelId",
@@ -455,6 +521,10 @@ export const getModelId = (settings: ProviderSettings): string | undefined => {
 	const modelIdKey = modelIdKeys.find((key) => settings[key])
 	return modelIdKey ? settings[modelIdKey] : undefined
 }
+
+/**
+ * TypicalProvider
+ */
 
 export type TypicalProvider = Exclude<ProviderName, InternalProvider | CustomProvider | FauxProvider>
 
@@ -491,43 +561,114 @@ export const modelIdKeysByProvider: Record<TypicalProvider, ModelIdKey> = {
 	"opencode-go": "opencodeGoModelId",
 }
 
+/**
+ * ANTHROPIC_STYLE_PROVIDERS
+ */
+
+// Providers that use Anthropic-style API protocol.
 export const ANTHROPIC_STYLE_PROVIDERS: ProviderName[] = ["anthropic", "bedrock", "minimax"]
 
 export const getApiProtocol = (provider: ProviderName | undefined, modelId?: string): "anthropic" | "openai" => {
 	if (provider && ANTHROPIC_STYLE_PROVIDERS.includes(provider)) {
 		return "anthropic"
 	}
+
 	if (provider && provider === "vertex" && modelId && modelId.toLowerCase().includes("claude")) {
 		return "anthropic"
 	}
+
+	// Vercel AI Gateway uses anthropic protocol for anthropic models.
 	if (provider && provider === "vercel-ai-gateway" && modelId && modelId.toLowerCase().startsWith("anthropic/")) {
 		return "anthropic"
 	}
+
 	return "openai"
 }
+
+/**
+ * MODELS_BY_PROVIDER
+ */
 
 export const MODELS_BY_PROVIDER: Record<
 	Exclude<ProviderName, "fake-ai" | "gemini-cli" | "openai">,
 	{ id: ProviderName; label: string; models: string[] }
 > = {
-	anthropic: { id: "anthropic", label: "Anthropic", models: Object.keys(anthropicModels) },
-	bedrock: { id: "bedrock", label: "Amazon Bedrock", models: Object.keys(bedrockModels) },
-	deepseek: { id: "deepseek", label: "DeepSeek", models: Object.keys(deepSeekModels) },
-	fireworks: { id: "fireworks", label: "Fireworks", models: Object.keys(fireworksModels) },
-	gemini: { id: "gemini", label: "Google Gemini", models: Object.keys(geminiModels) },
-	mistral: { id: "mistral", label: "Mistral", models: Object.keys(mistralModels) },
-	moonshot: { id: "moonshot", label: "Moonshot", models: Object.keys(moonshotModels) },
-	minimax: { id: "minimax", label: "MiniMax", models: Object.keys(minimaxModels) },
-	mimo: { id: "mimo", label: "Xiaomi MiMo", models: Object.keys(mimoModels) },
-	"openai-codex": { id: "openai-codex", label: "OpenAI - ChatGPT Plus/Pro", models: Object.keys(openAiCodexModels) },
-	"openai-native": { id: "openai-native", label: "OpenAI", models: Object.keys(openAiNativeModels) },
+	anthropic: {
+		id: "anthropic",
+		label: "Anthropic",
+		models: Object.keys(anthropicModels),
+	},
+	bedrock: {
+		id: "bedrock",
+		label: "Amazon Bedrock",
+		models: Object.keys(bedrockModels),
+	},
+	deepseek: {
+		id: "deepseek",
+		label: "DeepSeek",
+		models: Object.keys(deepSeekModels),
+	},
+	fireworks: {
+		id: "fireworks",
+		label: "Fireworks",
+		models: Object.keys(fireworksModels),
+	},
+	gemini: {
+		id: "gemini",
+		label: "Google Gemini",
+		models: Object.keys(geminiModels),
+	},
+	mistral: {
+		id: "mistral",
+		label: "Mistral",
+		models: Object.keys(mistralModels),
+	},
+	moonshot: {
+		id: "moonshot",
+		label: "Moonshot",
+		models: Object.keys(moonshotModels),
+	},
+	minimax: {
+		id: "minimax",
+		label: "MiniMax",
+		models: Object.keys(minimaxModels),
+	},
+	mimo: {
+		id: "mimo",
+		label: "Xiaomi MiMo",
+		models: Object.keys(mimoModels),
+	},
+	"openai-codex": {
+		id: "openai-codex",
+		label: "OpenAI - ChatGPT Plus/Pro",
+		models: Object.keys(openAiCodexModels),
+	},
+	"openai-native": {
+		id: "openai-native",
+		label: "OpenAI",
+		models: Object.keys(openAiNativeModels),
+	},
 	"qwen-code": { id: "qwen-code", label: "Qwen Code", models: Object.keys(qwenCodeModels) },
-	sambanova: { id: "sambanova", label: "SambaNova", models: Object.keys(sambaNovaModels) },
-	vertex: { id: "vertex", label: "GCP Vertex AI", models: Object.keys(vertexModels) },
-	"vscode-lm": { id: "vscode-lm", label: "VS Code LM API", models: Object.keys(vscodeLlmModels) },
+	sambanova: {
+		id: "sambanova",
+		label: "SambaNova",
+		models: Object.keys(sambaNovaModels),
+	},
+	vertex: {
+		id: "vertex",
+		label: "GCP Vertex AI",
+		models: Object.keys(vertexModels),
+	},
+	"vscode-lm": {
+		id: "vscode-lm",
+		label: "VS Code LM API",
+		models: Object.keys(vscodeLlmModels),
+	},
 	xai: { id: "xai", label: "xAI (Grok)", models: Object.keys(xaiModels) },
 	zai: { id: "zai", label: "Z.ai", models: Object.keys(internationalZAiModels) },
 	baseten: { id: "baseten", label: "Baseten", models: Object.keys(basetenModels) },
+
+	// Dynamic providers; models pulled from remote APIs.
 	poe: { id: "poe", label: "Poe", models: [] },
 	litellm: { id: "litellm", label: "LiteLLM", models: [] },
 	openrouter: { id: "openrouter", label: "OpenRouter", models: [] },
@@ -535,6 +676,8 @@ export const MODELS_BY_PROVIDER: Record<
 	unbound: { id: "unbound", label: "Unbound", models: [] },
 	"vercel-ai-gateway": { id: "vercel-ai-gateway", label: "Vercel AI Gateway", models: [] },
 	"opencode-go": { id: "opencode-go", label: "Opencode Go", models: [] },
+
+	// Local providers; models discovered from localhost endpoints.
 	lmstudio: { id: "lmstudio", label: "LM Studio", models: [] },
 	ollama: { id: "ollama", label: "Ollama", models: [] },
 }

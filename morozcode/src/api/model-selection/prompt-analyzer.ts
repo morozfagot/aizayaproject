@@ -1,135 +1,230 @@
-import { type PromptAnalysis, type ComplexityLevel, type TaskType, type ModelSelectionConfig } from "./types"
-import { estimateTokenCount, shrinkPrompt } from "./prompt-adapter"
+/**
+ * Dynamic Model Selection — Prompt Analyzer
+ *
+ * Analyzes prompts to determine task type, complexity,
+ * and required accuracy for model selection.
+ */
 
-const ANALYZER_SYSTEM_PROMPT = `Analyze the following user prompt and return a strictly valid JSON object with no markdown formatting, no code blocks, and no extra text.
+import type { PromptAnalysis, TaskType, ComplexityLevel, AccuracyLevel, ModelInfo } from "./types"
 
-Required JSON schema:
-{
-  "complexity": "low|medium|high|very_high",
-  "taskType": "tagging|summarization|translation|code|reasoning|general",
-  "temperature": number,
-  "estimatedOutputTokens": number
+/**
+ * Context Dependency Index (CDI) — measures how much a task
+ * depends on conversation context vs. standalone prompt.
+ *
+ * CDI = 0.0 — fully standalone (e.g., tagging)
+ * CDI = 1.0 — fully context-dependent (e.g., summarization)
+ */
+export type CDI = number
+
+/**
+ * Result of model-aware prompt analysis.
+ */
+export interface ModelAwareAnalysis extends PromptAnalysis {
+	/** Context Dependency Index (0-1) */
+	cdi: CDI
+	/** Effective context limit considering CDI */
+	effectiveContextLimit: number
+	/** Whether the prompt needs shrinking for available models */
+	needsShrinking: boolean
+	/** Recommended shrink ratio (0-1, where 1 = no shrink) */
+	recommendedShrinkRatio: number
 }
 
-Evaluation criteria:
-- complexity: low = simple factual question; medium = multi-step instructions; high = analysis, debugging, or moderate code; very_high = architecture, deep reasoning, complex math.
-- taskType: infer from the primary intent of the prompt.
-- temperature: lower (0.1-0.3) for code/tagging/translation; medium (0.4-0.6) for analysis/summarization; higher (0.6-0.8) for creative reasoning or open-ended tasks.
-- estimatedOutputTokens: approximate expected response length in tokens (1 token ~= 4 English characters).`
-
-export interface PromptAnalyzerClient {
-	completePrompt(prompt: string): Promise<string>
-}
-
+/**
+ * Prompt analyzer for dynamic model selection.
+ */
 export class PromptAnalyzer {
-	private client: PromptAnalyzerClient
+	/**
+	 * Analyze a prompt to determine its characteristics.
+	 * Basic analysis without model awareness.
+	 */
+	analyze(prompt: string, contextMessages?: string[]): PromptAnalysis {
+		const taskType = this.detectTaskType(prompt)
+		const complexity = this.detectComplexity(prompt)
+		const estimatedTokens = this.estimateTokens(prompt, contextMessages)
+		const requiredAccuracy = this.determineRequiredAccuracy(taskType, complexity)
 
-	constructor(client: PromptAnalyzerClient) {
-		this.client = client
+		return {
+			taskType,
+			complexity,
+			estimatedTokens,
+			requiredAccuracy,
+		}
 	}
 
-	async analyze(enrichedPrompt: string): Promise<PromptAnalysis> {
-		const prompt = `${ANALYZER_SYSTEM_PROMPT}\n\nPrompt to analyze:\n"""\n${enrichedPrompt}\n"""`
-		const response = await this.client.completePrompt(prompt)
+	/**
+	 * Analyze a prompt with model awareness.
+	 * Includes CDI calculation and effective context limit.
+	 */
+	analyzeWithModelAwareness(
+		prompt: string,
+		availableModels: ModelInfo[],
+		contextMessages?: string[]
+	): ModelAwareAnalysis {
+		const baseAnalysis = this.analyze(prompt, contextMessages)
+		const cdi = this.calculateCDI(prompt, contextMessages)
+		const maxContextLimit = Math.max(...availableModels.map((m) => m.maxTokens), 0)
+		const effectiveContextLimit = Math.floor(maxContextLimit * (1 - cdi * 0.5))
 
-		return this.parseResponse(response.trim())
+		const needsShrinking = baseAnalysis.estimatedTokens > effectiveContextLimit
+		const recommendedShrinkRatio = needsShrinking
+			? Math.max(0.3, effectiveContextLimit / baseAnalysis.estimatedTokens)
+			: 1.0
+
+		return {
+			...baseAnalysis,
+			cdi,
+			effectiveContextLimit,
+			needsShrinking,
+			recommendedShrinkRatio,
+		}
 	}
 
-	async analyzeWithModelAwareness(
-		enrichedPrompt: string,
-		availableModels: ModelSelectionConfig[],
-	): Promise<{ analysis: PromptAnalysis; adaptedPrompt?: string; cdi?: number }> {
-		const promptTokens = estimateTokenCount(enrichedPrompt)
+	/**
+	 * Detect the task type from prompt content.
+	 */
+	private detectTaskType(prompt: string): TaskType {
+		const lower = prompt.toLowerCase()
 
-		const availableModelsFiltered = availableModels.filter((m) => m.availability)
-		const bestModel = availableModelsFiltered.length > 0
-			? availableModelsFiltered.reduce((best, m) => {
-				const currentLimit = m.effectiveContextLimit ?? Math.floor(m.contextWindow * 0.70)
-				const bestLimit = best ? (best.effectiveContextLimit ?? Math.floor(best.contextWindow * 0.70)) : 0
-				if (currentLimit > bestLimit) return m
-				return best
-			}, undefined as ModelSelectionConfig | undefined)
-			: undefined
+		// Code-related keywords
+		if (
+			/\b(code|function|class|method|variable|debug|refactor|implement|typescript|javascript|python)\b/i.test(lower)
+		) {
+			return "code"
+		}
 
-		let adaptedPrompt: string | undefined
-		let cdi: number | undefined
+		// Translation keywords
+		if (/\b(translate|translation|перевод|traduire|übersetzen)\b/i.test(lower)) {
+			return "translation"
+		}
 
-		if (bestModel) {
-			const effectiveLimit = bestModel.effectiveContextLimit ?? Math.floor(bestModel.contextWindow * 0.70)
-			cdi = effectiveLimit / bestModel.contextWindow
+		// Summarization keywords
+		if (/\b(summarize|summary|summary|резюме|résumé|zusammenfassung)\b/i.test(lower)) {
+			return "summarization"
+		}
 
-			if (promptTokens > effectiveLimit) {
-				const targetTokens = effectiveLimit
-				adaptedPrompt = shrinkPrompt(enrichedPrompt, { targetTokens, strategy: "middle" })
-				console.log(
-					`[PromptAnalyzer] promptTokens=${promptTokens} > effectiveLimit=${effectiveLimit} (CDI=${cdi?.toFixed(2)}), shrunk to ${estimateTokenCount(adaptedPrompt)}`,
-				)
+		// Tagging keywords
+		if (/\b(tag|label|classify|categorize|тег|метка|taggen)\b/i.test(lower)) {
+			return "tagging"
+		}
+
+		// Reasoning keywords
+		if (/\b(reason|analyze|explain|why|how|prove|доказать|analysieren)\b/i.test(lower)) {
+			return "reasoning"
+		}
+
+		return "general"
+	}
+
+	/**
+	 * Detect prompt complexity.
+	 */
+	private detectComplexity(prompt: string): ComplexityLevel {
+		const wordCount = prompt.split(/\s+/).length
+		const sentenceCount = prompt.split(/[.!?]+/).filter((s) => s.trim().length > 0).length
+
+		// Simple: short, single sentence
+		if (wordCount < 50 && sentenceCount <= 2) {
+			return "simple"
+		}
+
+		// Complex: long, multiple sentences, or contains code blocks
+		if (wordCount > 200 || sentenceCount > 10 || /```[\s\S]*```/.test(prompt)) {
+			return "complex"
+		}
+
+		return "moderate"
+	}
+
+	/**
+	 * Estimate token count for prompt + context.
+	 */
+	private estimateTokens(prompt: string, contextMessages?: string[]): number {
+		// Rough estimation: ~4 chars per token for English, ~3 for Cyrillic
+		const promptTokens = Math.ceil(prompt.length / 4)
+
+		if (!contextMessages || contextMessages.length === 0) {
+			return promptTokens
+		}
+
+		const contextTokens = contextMessages.reduce(
+			(sum, msg) => sum + Math.ceil(msg.length / 4),
+			0
+		)
+
+		return promptTokens + contextTokens
+	}
+
+	/**
+	 * Determine required accuracy level based on task type and complexity.
+	 */
+	private determineRequiredAccuracy(taskType: TaskType, complexity: ComplexityLevel): AccuracyLevel {
+		// Code and reasoning tasks require high accuracy
+		if (taskType === "code" || taskType === "reasoning") {
+			return "high"
+		}
+
+		// Complex tasks require at least medium accuracy
+		if (complexity === "complex") {
+			return "medium"
+		}
+
+		// Simple tasks can use low accuracy
+		if (complexity === "simple") {
+			return "low"
+		}
+
+		return "medium"
+	}
+
+	/**
+	 * Calculate Context Dependency Index (CDI).
+	 * Measures how much the task depends on conversation context.
+	 */
+	private calculateCDI(prompt: string, contextMessages?: string[]): CDI {
+		if (!contextMessages || contextMessages.length === 0) {
+			return 0.0
+		}
+
+		const lower = prompt.toLowerCase()
+		let cdi = 0.0
+
+		// Check for context-dependent keywords
+		const contextKeywords = [
+			"previous",
+			"above",
+			"earlier",
+			"before",
+			"context",
+			"conversation",
+			"history",
+			"continue",
+			"follow",
+			"based on",
+			"earlier we",
+			"as mentioned",
+			"as discussed",
+		]
+
+		for (const keyword of contextKeywords) {
+			if (lower.includes(keyword)) {
+				cdi += 0.2
 			}
 		}
 
-		const promptToAnalyze = adaptedPrompt || enrichedPrompt
-		const analysis = await this.analyze(promptToAnalyze)
-
-		return { analysis, adaptedPrompt, cdi }
-	}
-
-	private parseResponse(raw: string): PromptAnalysis {
-		const jsonText = raw
-			.replace(/^```(?:json)?\s*/, "")
-			.replace(/\s*```$/, "")
-			.trim()
-
-		let parsed: unknown
-		try {
-			parsed = JSON.parse(jsonText)
-		} catch {
-			throw new Error(`PromptAnalyzer: invalid JSON response: ${raw.slice(0, 200)}`)
+		// Check for pronouns that refer to previous context
+		const pronouns = ["it", "this", "that", "these", "those", "they", "them"]
+		for (const pronoun of pronouns) {
+			if (new RegExp(`\\b${pronoun}\\b`, "i").test(lower)) {
+				cdi += 0.1
+			}
 		}
 
-		if (!isPromptAnalysisLike(parsed)) {
-			throw new Error(`PromptAnalyzer: response does not match expected schema: ${jsonText.slice(0, 200)}`)
+		// Summarization and tagging are highly context-dependent
+		if (/\b(summarize|summary|tag|label|classify)\b/i.test(lower)) {
+			cdi += 0.3
 		}
 
-		return validatePromptAnalysis(parsed as Record<string, unknown>)
-	}
-}
-
-function isPromptAnalysisLike(v: unknown): v is Record<string, unknown> {
-	return (
-		typeof v === "object" &&
-		v !== null &&
-		"complexity" in v &&
-		"taskType" in v &&
-		"temperature" in v &&
-		"estimatedOutputTokens" in v
-	)
-}
-
-function clamp(n: number, min: number, max: number): number {
-	return Math.min(max, Math.max(min, n))
-}
-
-const VALID_COMPLEXITIES: ComplexityLevel[] = ["low", "medium", "high", "very_high"]
-const VALID_TASK_TYPES: TaskType[] = ["tagging", "summarization", "translation", "code", "reasoning", "general"]
-
-export function validatePromptAnalysis(raw: Record<string, unknown>): PromptAnalysis {
-	const complexity = (raw.complexity as string) ?? "medium"
-	const taskType = (raw.taskType as string) ?? "general"
-	const temperature = typeof raw.temperature === "number" ? raw.temperature : 0.7
-	const estimatedOutputTokens = typeof raw.estimatedOutputTokens === "number" ? raw.estimatedOutputTokens : 1024
-
-	const normalizedComplexity: ComplexityLevel = VALID_COMPLEXITIES.includes(complexity as ComplexityLevel)
-		? (complexity as ComplexityLevel)
-		: "medium"
-
-	const normalizedTaskType: TaskType = VALID_TASK_TYPES.includes(taskType as TaskType)
-		? (taskType as TaskType)
-		: "general"
-
-	return {
-		complexity: normalizedComplexity,
-		taskType: normalizedTaskType,
-		temperature: clamp(temperature, 0, 1),
-		estimatedOutputTokens: Math.max(1, Math.floor(estimatedOutputTokens)),
+		return Math.min(1.0, cdi)
 	}
 }

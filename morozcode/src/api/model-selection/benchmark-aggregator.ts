@@ -1,154 +1,206 @@
 /**
- * Multi-Source Benchmark Aggregator
+ * Dynamic Model Selection — Benchmark Aggregator
  *
- * Агрегация бенчмарков из нескольких источников с взвешенным средним.
- * Кэширование результатов (TTL 24 часа) чтобы не долбить API при каждом запросе.
+ * Aggregates model rankings from multiple benchmark sources
+ * with caching and graceful degradation.
  */
 
-import type { BenchmarkSource, BenchmarkWeights, ModelRanking } from "./benchmark-sources"
+import type { ModelRanking, BenchmarkWeights, BenchmarkSourceStats } from "./types"
 import { DEFAULT_BENCHMARK_WEIGHTS } from "./benchmark-sources"
+import type { BenchmarkSource } from "./benchmark-sources"
 
-export type AggregatedBenchmarks = Record<string, Record<string, number>>
-
-export interface BenchmarkSourceStats {
-	name: string
-	entriesCount: number
-	success: boolean
-	error?: string
-}
-
-export interface AggregationResult {
-	benchmarks: AggregatedBenchmarks
-	sourceStats: BenchmarkSourceStats[]
-	aggregationTimeMs: number
-	fromCache: boolean
-}
-
+/** Default cache TTL: 24 hours */
 export const DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-interface BenchmarkCache {
-	data: AggregatedBenchmarks
-	timestamp: number
-	sourceStats: BenchmarkSourceStats[]
+/**
+ * Aggregated model score from multiple sources.
+ */
+export interface AggregatedModelScore {
+	/** Model identifier */
+	modelId: string
+	/** Category/task type */
+	category: string
+	/** Weighted average score (0-100) */
+	weightedScore: number
+	/** Computed rank (1-200) */
+	rank: number
+	/** Number of sources that contributed */
+	sourcesCount: number
 }
 
+/**
+ * Benchmark aggregator with caching and parallel fetching.
+ */
 export class BenchmarkAggregator {
-	private cache: BenchmarkCache | undefined
+	private cache: Map<string, ModelRanking[]> = new Map()
+	private cacheTimestamp: number = 0
 	private readonly ttlMs: number
 	private readonly weights: BenchmarkWeights
-	private readonly sources: BenchmarkSource[]
 
 	constructor(
-		sources: BenchmarkSource[],
-		weights: BenchmarkWeights = DEFAULT_BENCHMARK_WEIGHTS,
-		ttlMs: number = DEFAULT_CACHE_TTL_MS,
+		private readonly sources: BenchmarkSource[],
+		options?: {
+			ttlMs?: number
+			weights?: BenchmarkWeights
+		}
 	) {
-		this.sources = sources
-		this.weights = weights
-		this.ttlMs = ttlMs
+		this.ttlMs = options?.ttlMs ?? DEFAULT_CACHE_TTL_MS
+		this.weights = options?.weights ?? DEFAULT_BENCHMARK_WEIGHTS
 	}
 
-	async getAggregatedBenchmarks(): Promise<AggregationResult> {
-		const now = Date.now()
-		if (this.cache && now - this.cache.timestamp < this.ttlMs) {
-			return {
-				benchmarks: this.cache.data,
-				sourceStats: this.cache.sourceStats,
-				aggregationTimeMs: 0,
-				fromCache: true,
-			}
+	/**
+	 * Get aggregated rankings for all models.
+	 * Uses cache if not expired.
+	 */
+	async getAggregatedRankings(): Promise<AggregatedModelScore[]> {
+		if (this.isCacheValid()) {
+			console.info("[BenchmarkAggregator] Using cached rankings")
+			return this.computeAggregatedScores(this.cache)
 		}
 
-		const startTime = Date.now()
-		const result = await this.aggregate()
-		const aggregationTimeMs = Date.now() - startTime
+		console.info("[BenchmarkAggregator] Fetching fresh rankings from all sources...")
+		const stats = await this.fetchAll()
+		this.logStats(stats)
 
-		this.cache = {
-			data: result.benchmarks,
-			timestamp: now,
-			sourceStats: result.sourceStats,
-		}
-
-		return { ...result, aggregationTimeMs, fromCache: false }
+		return this.computeAggregatedScores(this.cache)
 	}
 
-	async refresh(): Promise<AggregationResult> {
-		this.invalidateCache()
-		return this.getAggregatedBenchmarks()
+	/**
+	 * Force refresh all rankings (bypasses cache).
+	 */
+	async refreshAll(): Promise<AggregatedModelScore[]> {
+		this.cache.clear()
+		this.cacheTimestamp = 0
+		return this.getAggregatedRankings()
 	}
 
-	invalidateCache(): void {
-		this.cache = undefined
+	/**
+	 * Check if cache is still valid.
+	 */
+	private isCacheValid(): boolean {
+		if (this.cache.size === 0) return false
+		return Date.now() - this.cacheTimestamp < this.ttlMs
 	}
 
-	private async aggregate(): Promise<AggregationResult> {
-		const sourceResults = await Promise.allSettled(
+	/**
+	 * Fetch rankings from all sources in parallel.
+	 */
+	private async fetchAll(): Promise<BenchmarkSourceStats[]> {
+		const results = await Promise.allSettled(
 			this.sources.map(async (source) => {
 				const rankings = await source.fetchRankings()
-				return { source, rankings }
-			}),
+				return { source: source.name, rankings }
+			})
 		)
 
-		const sourceStats: BenchmarkSourceStats[] = []
-		const successfulResults: { source: BenchmarkSource; rankings: ModelRanking[] }[] = []
+		const stats: BenchmarkSourceStats[] = []
 
-		for (const result of sourceResults) {
+		for (const result of results) {
 			if (result.status === "fulfilled") {
 				const { source, rankings } = result.value
-				sourceStats.push({ name: source.name, entriesCount: rankings.length, success: true })
-				if (rankings.length > 0) {
-					successfulResults.push({ source, rankings })
-				}
+				this.cache.set(source, rankings)
+				stats.push({
+					entriesCount: rankings.length,
+					success: true,
+				})
 			} else {
-				sourceStats.push({ name: "unknown", entriesCount: 0, success: false, error: String(result.reason) })
+				stats.push({
+					entriesCount: 0,
+					success: false,
+					error: result.reason?.message || "Unknown error",
+				})
 			}
 		}
 
-		const benchmarks = this.computeWeightedAverage(successfulResults)
-		return { benchmarks, sourceStats, aggregationTimeMs: 0, fromCache: false }
+		this.cacheTimestamp = Date.now()
+		return stats
 	}
 
-	private computeWeightedAverage(
-		results: { source: BenchmarkSource; rankings: ModelRanking[] }[],
-	): AggregatedBenchmarks {
-		const weightMap: Record<string, number> = {
-			openrouter: this.weights.openrouter,
-			artificial_analysis: this.weights.artificialAnalysis,
-			lmsys: this.weights.lmsys,
-			openllm: this.weights.openllm,
+	/**
+	 * Log fetch statistics.
+	 */
+	private logStats(stats: BenchmarkSourceStats[]): void {
+		for (let i = 0; i < stats.length; i++) {
+			const source = this.sources[i]
+			const stat = stats[i]
+			if (stat.success) {
+				console.info(`[BenchmarkAggregator] ${source.name}: ${stat.entriesCount} entries`)
+			} else {
+				console.warn(`[BenchmarkAggregator] ${source.name}: FAILED - ${stat.error}`)
+			}
 		}
+	}
 
-		const accumulator = new Map<string, Map<string, { weightedSum: number; weightSum: number }>>()
+	/**
+	 * Compute aggregated scores from cached rankings.
+	 */
+	private computeAggregatedScores(cache: Map<string, ModelRanking[]>): AggregatedModelScore[] {
+		// Group rankings by modelId + category
+		const grouped = new Map<string, { modelId: string; category: string; scores: Array<{ score: number; weight: number }> }>()
 
-		for (const { source, rankings } of results) {
-			const sourceWeight = weightMap[source.name] ?? 0.1
+		for (const [sourceName, rankings] of cache) {
+			const weight = this.getWeightForSource(sourceName)
 			for (const ranking of rankings) {
-				const modelId = ranking.modelId.toLowerCase()
-				const category = ranking.category
-
-				if (!accumulator.has(modelId)) {
-					accumulator.set(modelId, new Map())
+				const key = `${ranking.modelId}::${ranking.category}`
+				if (!grouped.has(key)) {
+					grouped.set(key, {
+						modelId: ranking.modelId,
+						category: ranking.category,
+						scores: [],
+					})
 				}
-				const modelCategories = accumulator.get(modelId)!
-				if (!modelCategories.has(category)) {
-					modelCategories.set(category, { weightedSum: 0, weightSum: 0 })
-				}
-				const catData = modelCategories.get(category)!
-				catData.weightedSum += sourceWeight * ranking.score
-				catData.weightSum += sourceWeight
+				grouped.get(key)!.scores.push({ score: ranking.score, weight })
 			}
 		}
 
-		const benchmarks: AggregatedBenchmarks = {}
-		for (const [modelId, categories] of accumulator) {
-			benchmarks[modelId] = {}
-			for (const [category, data] of categories) {
-				if (data.weightSum > 0) {
-					const weightedScore = data.weightedSum / data.weightSum
-					benchmarks[modelId][category] = Math.round(1 + (1 - weightedScore) * 199)
-				}
-			}
+		// Compute weighted average for each model
+		const aggregated: AggregatedModelScore[] = []
+
+		for (const [, data] of grouped) {
+			const totalWeight = data.scores.reduce((sum, s) => sum + s.weight, 0)
+			if (totalWeight === 0) continue
+
+			const weightedScore = data.scores.reduce((sum, s) => sum + s.score * s.weight, 0) / totalWeight
+
+			aggregated.push({
+				modelId: data.modelId,
+				category: data.category,
+				weightedScore,
+				rank: 0, // Will be assigned after sorting
+				sourcesCount: data.scores.length,
+			})
 		}
-		return benchmarks
+
+		// Sort by category, then by weightedScore descending
+		const categories = [...new Set(aggregated.map((a) => a.category))]
+		const sorted: AggregatedModelScore[] = []
+
+		for (const category of categories) {
+			const categoryItems = aggregated.filter((a) => a.category === category)
+			categoryItems.sort((a, b) => b.weightedScore - a.weightedScore)
+			categoryItems.forEach((item, i) => { item.rank = i + 1 })
+			sorted.push(...categoryItems)
+		}
+
+		// Return top 200 per category
+		return sorted.filter((a) => a.rank <= 200)
+	}
+
+	/**
+	 * Get weight for a source by name.
+	 */
+	private getWeightForSource(sourceName: string): number {
+		switch (sourceName) {
+			case "OpenRouter":
+				return this.weights.openRouter
+			case "ArtificialAnalysis":
+				return this.weights.artificialAnalysis
+			case "LMSYS":
+				return this.weights.lmsys
+			case "OpenLLM":
+				return this.weights.openllm
+			default:
+				return 0.1
+		}
 	}
 }
