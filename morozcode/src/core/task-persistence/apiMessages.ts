@@ -8,6 +8,7 @@ import { fileExistsAtPath } from "../../utils/fs"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
 import { getTaskDirectoryPath } from "../../utils/storage"
+import { setRefactoringFlag, clearRefactoringFlag } from "./refactoringLock"
 
 /**
  * Структура тегов релевантности для гибридного RAG-поиска.
@@ -50,16 +51,8 @@ export type RelevanceTags = {
 
 /** Фрагмент сообщения с тегами релевантности (для chunk-level RAG) */
 export type MessageFragment = {
-	/** Уникальный ID фрагмента: "msg-{ts}-frag-{n}" */
 	chunk_id: string
-	/** Оригинальный текст фрагмента (для embedding) */
-	text: string
-	/** Краткая суммаризация (1-2 предложения) */
-	summary: string
-	/** Теги фрагмента — для pre-filter RAG-поиска */
-	tags: RelevanceTags
-	/** Ссылка на embedding (заполнится в 2.9.4) */
-	embedding_ref?: string
+	tags?: RelevanceTags
 }
 
 /** ApiMessage с расширенной системой тегов релевантности */
@@ -181,4 +174,36 @@ export async function saveApiMessages({
 	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId)
 	const filePath = path.join(taskDir, GlobalFileNames.apiConversationHistory)
 	await safeWriteJson(filePath, messages)
+}
+
+/**
+ * Трансформация API-сообщений с блокировкой рефакторинга.
+ * Потокобезопасная обёртка: setFlag → read → transform → save → finally { clearFlag }.
+ *
+ * @param taskId - ID задачи
+ * @param globalStoragePath - путь к глобальному хранилищу
+ * @param transformFn - функция трансформации сообщений
+ * @param processId - опциональный ID процесса для отладки
+ */
+export async function refactorApiMessagesWithLock({
+	taskId,
+	globalStoragePath,
+	transformFn,
+	processId,
+}: {
+	taskId: string
+	globalStoragePath: string
+	transformFn: (messages: ApiMessage[]) => ApiMessage[] | Promise<ApiMessage[]>
+	processId?: string
+}): Promise<ApiMessage[]> {
+	await setRefactoringFlag(taskId, globalStoragePath, processId)
+
+	try {
+		const messages = await readApiMessages({ taskId, globalStoragePath })
+		const transformed = await transformFn(messages)
+		await saveApiMessages({ messages: transformed, taskId, globalStoragePath })
+		return transformed
+	} finally {
+		await clearRefactoringFlag(taskId, globalStoragePath)
+	}
 }
