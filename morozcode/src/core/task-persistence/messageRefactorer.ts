@@ -1,500 +1,528 @@
+import { ApiMessage, MessageFragment, RelevanceTags, saveApiMessages } from "./apiMessages"
+import { setRefactoringFlag, clearRefactoringFlag } from "./refactoringLock"
+import { TagIndex, addChunkToIndex, persistTagIndex, readTagIndex } from "./tagIndex"
+import { generateAutoTags, validateTags } from "./relevanceTags"
+import type { ApiHandler } from "../../api"
+
+// ─── Типы ────────────────────────────────────────────────────────────────────
+
 /**
- * Рефакторинг и тегирование ответа модели — единый async LLM-поток.
- *
- * Функция refactorAndTagMessage():
- * 1. Декомпозирует ответ модели на фрагменты (chunk'и)
- * 2. Суммаризует каждый фрагмент
- * 3. Присваивает каждому фрагменту собственные RelevanceTags
- * 4. Обновляет БД и TagIndex атомарно
- * 5. Снимает флаг блокировки в finally
- *
- * Исправления относительно Roo Code:
- * - extractRecentContext() → extractRelevantContext(): динамический контекст
- *   на основе пересечения тегов (Jaccard similarity), а не фиксированное N=3
+ * Фрагмент сообщения с тегами релевантности (для chunk-level RAG).
+ * Расширение MessageFragment из apiMessages.ts с обязательными полями
+ * для результата рефакторинга.
  */
-
-import { ApiMessage, RelevanceTags, saveApiMessages, type MessageFragment } from "./apiMessages"
-import {
-	setRefactoringFlag,
-	clearRefactoringFlag,
-} from "./refactoringLock"
-import {
-	persistTagIndex,
-	buildTagIndex,
-} from "./tagIndex"
-import { generateAutoTags, validateTags, createEmptyTags } from "./relevanceTags"
-import type { SingleCompletionHandler } from "../../api"
-
-/** Результат функции refactorAndTagMessage */
-export interface RefactorAndTagResult {
-	fragments: MessageFragment[]
-	messageTags: RelevanceTags
-}
-
-/** Сырой ответ LLM — JSON-структура из промпта */
-interface LLMFragmentResult {
+export interface RefactoredFragment {
+	chunk_id: string
 	text: string
 	summary: string
-	tags?: {
-		direct: string[]
-		depends_on?: string[]
-		depended_by?: string[]
-		references?: {
-			messages?: number[]
-			files?: string[]
-			nodes?: string[]
-		}
-		weights?: Record<string, number>
-	}
+	tags: RelevanceTags
+	embedding_ref?: string
 }
 
-interface LLMResponse {
-	fragments: LLMFragmentResult[]
+/**
+ * Результат рефакторинга и тегирования сообщения.
+ */
+export interface RefactorAndTagResult {
+	/** Фрагменты с тегами */
+	fragments: RefactoredFragment[]
+	/** Агрегированные теги на уровне сообщения */
+	tags: RelevanceTags
+	/** Источник тегирования */
+	source: "llm" | "fallback"
+	/** Стоимость операции (USD) */
+	cost: number
+	/** Ошибка, если произошла */
+	error?: string
 }
 
-/** Параметры для refactorAndTagMessage */
+/**
+ * Опции для refactorAndTagMessage.
+ */
 export interface RefactorAndTagOptions {
-	/** Сообщение ассистента для рефакторинга */
-	message: ApiMessage
-	/** Весь массив истории сообщений (для контекста и обновления) */
-	allMessages: ApiMessage[]
-	taskId: string
-	globalStoragePath: string
-	/** API handler для LLM-вызова */
-	apiHandler: SingleCompletionHandler
+	/** Модель для LLM-вызова (опционально, по умолчанию используется модель из apiHandler) */
+	model?: string
+	/** Максимальное количество фрагментов */
+	maxFragments?: number
+	/** Таймаут в миллисекундах */
+	timeoutMs?: number
+	/** Системный промпт (опционально, по умолчанию используется REFACTOR_SYSTEM_PROMPT) */
+	systemPrompt?: string
 }
 
-/**
- * Извлекает текстовое содержимое из сообщения.
- */
-function extractMessageText(message: ApiMessage): string {
-	if (typeof message.content === "string") return message.content
-	if (Array.isArray(message.content)) {
-		const texts: string[] = []
-		for (const block of message.content) {
-			const b = block as unknown as Record<string, unknown>
-			if (b.type === "text" && typeof b.text === "string") {
-				texts.push(b.text)
-			}
-		}
-		return texts.join("\n")
-	}
-	if (message.text) return message.text
-	return ""
-}
+// ─── Системный промпт ────────────────────────────────────────────────────────
 
-/**
- * Максимальное количество сообщений в контексте для LLM.
- * Жёсткий лимит предотвращает переполнение контекстного окна.
- */
-const MAX_CONTEXT_MESSAGES = 10
+const REFACTOR_SYSTEM_PROMPT = `You are a message refactoring and tagging assistant. Your task is to:
 
-/**
- * Минимальный score для включения сообщения в контекст.
- * Сообщения с пересечением тегов ниже этого порога игнорируются.
- */
-const MIN_CONTEXT_SCORE = 0.1
+1. DECOMPOSE the assistant message into logical fragments (chunks)
+2. SUMMARIZE each fragment concisely (1-2 sentences)
+3. TAG each fragment with relevance tags
 
-/**
- * Извлекает релевантный контекст из истории сообщений на основе
- * пересечения тегов с текущим сообщением.
- *
- * Алгоритм (динамический контекст):
- * 1. Собираем все уникальные теги из ближайших сообщений как "профиль темы"
- * 2. Для каждого сообщения вычисляем score = |intersection| / |union|
- *    (Jaccard similarity между наборами тегов)
- * 3. Фильтруем: score >= MIN_CONTEXT_SCORE
- * 4. Сортируем по убыванию score, затем по времени (сначала ближайшие)
- * 5. Берём топ-N (MAX_CONTEXT_MESSAGES)
- *
- * Fallback: если у сообщений нет тегов — берём последние 3 сообщения.
- */
-function extractRelevantContext(
-	allMessages: ApiMessage[],
-	currentTs: number | undefined,
-): string {
-	const currentMsgTs = currentTs ?? Infinity
-
-	// Сообщения ДО текущего
-	const messagesBefore = allMessages.filter((m) => (m.ts ?? 0) < currentMsgTs)
-
-	if (messagesBefore.length === 0) {
-		return ""
-	}
-
-	// Пытаемся найти сообщения с тегами
-	const messagesWithTags = messagesBefore.filter(
-		(m) => m.relevance_tags && m.relevance_tags.direct && m.relevance_tags.direct.length > 0,
-	)
-
-	if (messagesWithTags.length === 0) {
-		// Fallback: нет тегов — берём последние 3
-		const recent = messagesBefore.slice(-3)
-		return recent
-			.map((m) => {
-				const role = m.role
-				const text = extractMessageText(m)
-				return `[${role}]: ${text.substring(0, 200)}`
-			})
-			.join("\n---\n")
-	}
-
-	// Собираем все уникальные теги из ближайших сообщений как "профиль темы"
-	const recentMessages = messagesBefore.slice(-20)
-	const topicTags = new Set<string>()
-	for (const m of recentMessages) {
-		if (m.relevance_tags?.direct) {
-			for (const tag of m.relevance_tags.direct) {
-				topicTags.add(tag)
-			}
-		}
-	}
-
-	// Оцениваем каждое сообщение по релевантности к текущей теме
-	const scored = messagesBefore.map((m) => {
-		const msgTags = new Set(m.relevance_tags?.direct ?? [])
-
-		if (msgTags.size === 0 || topicTags.size === 0) {
-			return { message: m, score: 0 }
-		}
-
-		// Jaccard similarity: |intersection| / |union|
-		const intersection = new Set([...msgTags].filter((t) => topicTags.has(t)))
-		const union = new Set([...msgTags, ...topicTags])
-		const score = intersection.size / union.size
-
-		return { message: m, score }
-	})
-
-	// Фильтруем по минимальному score, сортируем по score (убывание),
-	// затем по ts (убывание — ближайшие первыми)
-	const relevant = scored
-		.filter((s) => s.score >= MIN_CONTEXT_SCORE)
-		.sort((a, b) => {
-			if (b.score !== a.score) return b.score - a.score
-			return (b.message.ts ?? 0) - (a.message.ts ?? 0)
-		})
-		.slice(0, MAX_CONTEXT_MESSAGES)
-		.map((s) => s.message)
-
-	// Если после фильтрации ничего не осталось — fallback на последние 3
-	if (relevant.length === 0) {
-		const recent = messagesBefore.slice(-3)
-		return recent
-			.map((m) => {
-				const role = m.role
-				const text = extractMessageText(m)
-				return `[${role}]: ${text.substring(0, 200)}`
-			})
-			.join("\n---\n")
-	}
-
-	return relevant
-		.map((m) => {
-			const role = m.role
-			const text = extractMessageText(m)
-			return `[${role}]: ${text.substring(0, 200)}`
-		})
-		.join("\n---\n")
-}
-
-/**
- * Строит промпт для LLM — единый вызов для декомпозиции, суммаризации и тегирования.
- */
-function buildRefactoringPrompt(
-	messageText: string,
-	relevantContext: string,
-): string {
-	const contextSection = relevantContext
-		? `RELEVANT CONTEXT (dynamically selected by tag relevance):
----
-${relevantContext}
----`
-		: ""
-
-	return `You are a message analyzer for a hybrid RAG system. Your task is to decompose, summarize, and tag an assistant message for efficient retrieval.
-
-MESSAGE TO ANALYZE:
----
-${messageText}
----
-
-${contextSection}
-
-Produce valid JSON with this exact schema:
+Output format (JSON only, no markdown):
 {
   "fragments": [
     {
-      "text": "original fragment text",
-      "summary": "1-2 sentence summary",
+      "chunk_id": "unique-id",
+      "text": "fragment text",
+      "summary": "brief summary",
       "tags": {
-        "direct": ["topic1", "tool:read_file"],
+        "direct": ["tag1", "tag2"],
         "depends_on": [],
         "depended_by": [],
-        "references": {
-          "messages": [],
-          "files": ["src/utils.ts"],
-          "nodes": []
-        },
-        "weights": {
-          "tool:read_file": 0.9,
-          "topic1": 0.6
-        }
+        "weights": {"tag1": 0.9, "tag2": 0.7}
       }
     }
   ]
 }
 
-RULES:
-- Decompose by logical boundaries: topic changes, tool calls, code vs explanation
+Rules:
+- Each fragment should be a self-contained unit of meaning
 - Maximum 10 direct tags per fragment
-- Tags must be specific: "tool:read_file" not "tool", "typescript:interface" not "code"
-- Summary must be 1-2 sentences, self-contained
-- Include file paths from tool calls in references.files
-- For each tag in "direct", provide a weight (0.0-1.0) in "weights" based on how important this tag is for the fragment's content
-- If message is short (< 200 words), return 1 fragment
-- Do NOT include markdown code fences or any text outside the JSON object`
+- Weights must be between 0.0 and 1.0
+- Use lowercase tags with colons for categories (e.g., "tool:read_file", "file:path/to/file")
+- If the message is short and coherent, return a single fragment
+- Preserve code blocks within fragments`
+
+// ─── Вспомогательные функции ─────────────────────────────────────────────────
+
+/**
+ * Извлекает текст из ApiMessage.
+ * Обрабатывает как строковый content, так и массив content blocks.
+ */
+export function extractMessageText(message: ApiMessage): string {
+	if (typeof message.content === "string") {
+		return message.content
+	}
+
+	if (Array.isArray(message.content)) {
+		const parts: string[] = []
+		for (const block of message.content) {
+			if (typeof block === "string") {
+				parts.push(block)
+			} else if (block && typeof block === "object") {
+				const obj = block as unknown as Record<string, unknown>
+				if (obj.type === "text" && typeof obj.text === "string") {
+					parts.push(obj.text)
+				} else if (obj.type === "tool_use") {
+					const name = (obj.name as string) || "unknown"
+					parts.push(`[tool:${name}]`)
+				} else if (obj.type === "tool_result") {
+					const content = obj.content
+					if (typeof content === "string") {
+						parts.push(content)
+					} else if (Array.isArray(content)) {
+						for (const item of content) {
+							if (item && typeof item === "object" && (item as any).type === "text") {
+								parts.push((item as any).text || "")
+							}
+						}
+					}
+				}
+			}
+		}
+		return parts.join("\n")
+	}
+
+	if (message.text) {
+		return message.text
+	}
+
+	return ""
 }
 
 /**
- * Парсит ответ LLM, извлекая JSON из текста.
- * Обрабатывает markdown-обёртки и другие артефакты.
+ * Извлекает релевантный контекст из истории сообщений.
+ * Возвращает последние N сообщений в формате "role: text".
  */
-function parseLLMResponse(rawResponse: string): LLMResponse {
-	let cleaned = rawResponse.trim()
+export function extractRelevantContext(messages: ApiMessage[], contextWindow: number = 5): string {
+	const recent = messages.slice(-contextWindow)
+	const lines: string[] = []
 
-	// Убираем markdown code fences если есть
-	const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
-	if (codeBlockMatch) {
-		cleaned = codeBlockMatch[1].trim()
+	for (const msg of recent) {
+		const text = extractMessageText(msg)
+		if (text.trim()) {
+			// Обрезаем длинные сообщения для контекста
+			const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text
+			lines.push(`${msg.role}: ${truncated}`)
+		}
 	}
 
-	// Убираем текст до первого { и после последнего }
-	const firstBrace = cleaned.indexOf("{")
-	const lastBrace = cleaned.lastIndexOf("}")
-	if (firstBrace !== -1 && lastBrace !== -1) {
-		cleaned = cleaned.substring(firstBrace, lastBrace + 1)
-	}
-
-	const parsed = JSON.parse(cleaned) as LLMResponse
-	if (!parsed.fragments || !Array.isArray(parsed.fragments)) {
-		throw new Error("Invalid LLM response: missing fragments array")
-	}
-	return parsed
+	return lines.join("\n---\n")
 }
 
 /**
- * Конвертирует сырой LLM-фрагмент в MessageFragment.
- * Валидирует теги, применяет fallback при необходимости.
+ * Формирует промпт для LLM из текста сообщения и контекста.
  */
-function convertToMessageFragment(
-	raw: LLMFragmentResult,
+export function buildRefactoringPrompt(
+	messageText: string,
+	context: string,
+	maxFragments: number = 5,
+): string {
+	return `Context (recent conversation):
+${context}
+
+---
+
+Message to refactor and tag:
+${messageText}
+
+---
+
+Please decompose this message into at most ${maxFragments} logical fragments, summarize each, and assign relevance tags. Return JSON only.`
+}
+
+/**
+ * Парсит ответ LLM в массив фрагментов.
+ * Возвращает null если парсинг не удался.
+ */
+export function parseLLMResponse(responseText: string): Array<{
+	chunk_id: string
+	text: string
+	summary: string
+	tags: {
+		direct: string[]
+		depends_on: string[]
+		depended_by: string[]
+		weights: Record<string, number>
+	}
+}> | null {
+	// Извлекаем JSON из ответа (может быть обёрнут в markdown code block)
+	let jsonStr = responseText.trim()
+
+	// Убираем markdown code blocks если есть
+	const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/)
+	if (codeBlockMatch?.[1]) {
+		jsonStr = codeBlockMatch[1].trim()
+	}
+
+	try {
+		const parsed = JSON.parse(jsonStr)
+		if (!parsed.fragments || !Array.isArray(parsed.fragments)) {
+			return null
+		}
+		return parsed.fragments
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Конвертирует сырой фрагмент из ответа LLM в RefactoredFragment.
+ */
+export function convertToMessageFragment(
+	raw: {
+		chunk_id: string
+		text: string
+		summary: string
+		tags: {
+			direct: string[]
+			depends_on: string[]
+			depended_by: string[]
+			weights: Record<string, number>
+		}
+	},
 	messageTs: number,
 	fragmentIndex: number,
-): MessageFragment {
-	const chunkId = `msg-${messageTs}-frag-${fragmentIndex}`
-
-	// Валидация и fallback тегов
-	let tags: RelevanceTags
-	if (raw.tags && validateTags(raw.tags as RelevanceTags)) {
-		tags = raw.tags as RelevanceTags
-	} else {
-		// Fallback: пустые теги
-		tags = createEmptyTags("fallback")
-	}
+): RefactoredFragment {
+	const chunkId = raw.chunk_id || `msg-${messageTs}-frag-${fragmentIndex}`
 
 	return {
 		chunk_id: chunkId,
 		text: raw.text,
 		summary: raw.summary,
-		tags,
-		embedding_ref: undefined, // Будет заполнено в 2.9.4
+		tags: {
+			direct: raw.tags.direct || [],
+			depends_on: raw.tags.depends_on || [],
+			depended_by: raw.tags.depended_by || [],
+			references: {
+				messages: [],
+				files: [],
+				nodes: [],
+			},
+			weights: raw.tags.weights || {},
+			source: "llm",
+			schema_version: 1,
+		},
 	}
 }
 
 /**
- * Агрегирует теги всех фрагментов в message-level теги.
+ * Агрегирует теги фрагментов на уровне сообщения.
+ * Объединяет direct теги всех фрагментов, берёт максимальные веса.
  */
-function aggregateFragmentTags(fragments: MessageFragment[]): RelevanceTags {
-	const direct = new Set<string>()
-	const depends_on = new Set<string>()
-	const depended_by = new Set<string>()
-	const files = new Set<string>()
-	const nodes = new Set<string>()
-	const messages = new Set<number>()
-	const weights: Record<string, number> = {}
+export function aggregateFragmentTags(fragments: RefactoredFragment[]): RelevanceTags {
+	const allDirect: string[] = []
+	const allDependsOn: string[] = []
+	const allDependedBy: string[] = []
+	const allWeights: Record<string, number> = {}
+	const allMessages: number[] = []
+	const allFiles: string[] = []
+	const allNodes: string[] = []
 
 	for (const frag of fragments) {
-		const t = frag.tags
-		for (const tag of t.direct ?? []) {
-			direct.add(tag)
-			if (t.weights?.[tag] !== undefined) {
-				weights[tag] = Math.max(weights[tag] ?? 0, t.weights[tag])
+		if (!frag.tags) continue
+
+		for (const tag of frag.tags.direct) {
+			if (!allDirect.includes(tag)) {
+				allDirect.push(tag)
 			}
 		}
-		for (const tag of t.depends_on ?? []) depends_on.add(tag)
-		for (const tag of t.depended_by ?? []) depended_by.add(tag)
-		for (const f of t.references?.files ?? []) files.add(f)
-		for (const n of t.references?.nodes ?? []) nodes.add(n)
-		for (const m of t.references?.messages ?? []) messages.add(m)
+
+		for (const tag of frag.tags.depends_on) {
+			if (!allDependsOn.includes(tag)) {
+				allDependsOn.push(tag)
+			}
+		}
+
+		for (const tag of frag.tags.depended_by) {
+			if (!allDependedBy.includes(tag)) {
+				allDependedBy.push(tag)
+			}
+		}
+
+		// Берём максимальный вес для каждого тега
+		for (const [tag, weight] of Object.entries(frag.tags.weights)) {
+			const existingWeight = allWeights[tag]
+			if (existingWeight === undefined || weight > existingWeight) {
+				allWeights[tag] = weight
+			}
+		}
+
+		// Собираем references
+		if (frag.tags.references) {
+			for (const msg of frag.tags.references.messages) {
+				if (!allMessages.includes(msg)) allMessages.push(msg)
+			}
+			for (const file of frag.tags.references.files) {
+				if (!allFiles.includes(file)) allFiles.push(file)
+			}
+			for (const node of frag.tags.references.nodes) {
+				if (!allNodes.includes(node)) allNodes.push(node)
+			}
+		}
 	}
 
-	// Ограничиваем direct до 10
-	const limitedDirect = [...direct].slice(0, 10)
-
 	return {
-		direct: limitedDirect,
-		depends_on: [...depends_on],
-		depended_by: [...depended_by],
+		direct: allDirect.slice(0, 10),
+		depends_on: allDependsOn,
+		depended_by: allDependedBy,
 		references: {
-			messages: [...messages],
-			files: [...files],
-			nodes: [...nodes],
+			messages: allMessages,
+			files: allFiles,
+			nodes: allNodes,
 		},
-		weights,
+		weights: allWeights,
 		source: "llm",
 		schema_version: 1,
 	}
 }
 
 /**
- * Рефакторинг и тегирование ответа модели — единый async LLM-поток.
- *
- * Алгоритм:
- * 1. setRefactoringFlag() — блокирует обогащение промпта
- * 2. Извлекаем текст сообщения и динамический контекст
- * 3. Вызываем LLM для декомпозиции + суммаризации + тегирования
- * 4. Валидируем фрагменты, применяем fallback при необходимости
- * 5. Обновляем message.relevance_tags и message.fragments
- * 6. Сохраняем БД и TagIndex атомарно (порядок операций = атомарность)
- * 7. finally { clearRefactoringFlag() } — гарантия снятия блокировки
+ * Атомарно сохраняет сообщения и обновляет тег-индекс.
+ * Гарантия: либо оба сохранения проходят, либо выбрасывается ошибка.
  */
-export async function refactorAndTagMessage({
-	message,
-	allMessages,
-	taskId,
-	globalStoragePath,
-	apiHandler,
-}: RefactorAndTagOptions): Promise<RefactorAndTagResult> {
-	// Ставим флаг блокировки
-	await setRefactoringFlag({ taskId, globalStoragePath })
-
-	try {
-		const messageTs = message.ts ?? Date.now()
-		const messageText = extractMessageText(message)
-		const relevantContext = extractRelevantContext(allMessages, messageTs)
-		const prompt = buildRefactoringPrompt(messageText, relevantContext)
-
-		// Вызываем LLM
-		const rawResponse = await apiHandler.completePrompt(prompt)
-
-		// Парсим ответ
-		let llmResult: LLMResponse
-		try {
-			llmResult = parseLLMResponse(rawResponse)
-		} catch (parseError) {
-			// Полный fallback — LLM вернул невалидный JSON
-			console.warn(
-				`[refactorAndTagMessage] LLM response parse error, using full fallback. TaskId: ${taskId}`,
-			)
-			const autoTags = generateAutoTags(message)
-			const fallbackFragment: MessageFragment = {
-				chunk_id: `msg-${messageTs}-frag-0`,
-				text: messageText,
-				summary: messageText.substring(0, 200),
-				tags: autoTags,
-				embedding_ref: undefined,
-			}
-			;(message as any).relevance_tags = autoTags
-			;(message as any).fragments = [fallbackFragment]
-
-			// Сохраняем атомарно
-			await saveMessagesWithIndex(allMessages, taskId, globalStoragePath)
-			return { fragments: [fallbackFragment], messageTags: autoTags }
-		}
-
-		// Конвертируем фрагменты с пофрагментным fallback
-		const validFragments: MessageFragment[] = []
-		const invalidRawFragments: LLMFragmentResult[] = []
-
-		for (let i = 0; i < llmResult.fragments.length; i++) {
-			const raw = llmResult.fragments[i]
-			if (raw.tags && validateTags(raw.tags as RelevanceTags)) {
-				validFragments.push(
-					convertToMessageFragment(raw, messageTs, validFragments.length),
-				)
-			} else {
-				invalidRawFragments.push(raw)
-			}
-		}
-
-		// Если есть невалидные фрагменты — мерджим в один fallback
-		if (invalidRawFragments.length > 0) {
-			const mergedText = invalidRawFragments.map((f) => f.text).join("\n")
-			const fallbackTags = createEmptyTags("fallback")
-			const fallbackFragment: MessageFragment = {
-				chunk_id: `msg-${messageTs}-frag-${validFragments.length}`,
-				text: mergedText,
-				summary: mergedText.substring(0, 200),
-				tags: fallbackTags,
-				embedding_ref: undefined,
-			}
-			validFragments.push(fallbackFragment)
-		}
-
-		// Если вообще нет фрагментов — полный fallback
-		if (validFragments.length === 0) {
-			const autoTags = generateAutoTags(message)
-			const fallbackFragment: MessageFragment = {
-				chunk_id: `msg-${messageTs}-frag-0`,
-				text: messageText,
-				summary: messageText.substring(0, 200),
-				tags: autoTags,
-				embedding_ref: undefined,
-			}
-			;(message as any).relevance_tags = autoTags
-			;(message as any).fragments = [fallbackFragment]
-			await saveMessagesWithIndex(allMessages, taskId, globalStoragePath)
-			return { fragments: [fallbackFragment], messageTags: autoTags }
-		}
-
-		// Агрегируем теги на уровне сообщения
-		const messageTags = aggregateFragmentTags(validFragments)
-
-		// Обновляем сообщение
-		;(message as any).relevance_tags = messageTags
-		;(message as any).fragments = validFragments
-
-		// Сохраняем атомарно
-		await saveMessagesWithIndex(allMessages, taskId, globalStoragePath)
-
-		return { fragments: validFragments, messageTags }
-	} finally {
-		await clearRefactoringFlag({ taskId, globalStoragePath })
-	}
-}
-
-/**
- * Атомарное сохранение сообщений и TagIndex — единая операция.
- * Атомарность обеспечивается порядком операций:
- * 1. Сохраняем сообщения (saveApiMessages)
- * 2. Перестраиваем TagIndex полностью из messages (buildTagIndex)
- * 3. Сохраняем TagIndex (persistTagIndex)
- *
- * TagIndex перестраивается полностью из messages при каждом сохранении,
- * поэтому атомарность гарантирована: индекс всегда консистентен с данными.
- * Ошибка на любом шаге = весь failure (clearRefactoringFlag в finally).
- */
-async function saveMessagesWithIndex(
+export async function saveMessagesWithIndex(
 	messages: ApiMessage[],
+	tagIndex: TagIndex,
 	taskId: string,
 	globalStoragePath: string,
 ): Promise<void> {
-	// 1. Сохраняем сообщения
+	// Атомарное сохранение: сначала сообщения, потом индекс
+	// Если saveApiMessages упадёт — индекс не обновится (консистентность)
 	await saveApiMessages({ messages, taskId, globalStoragePath })
+	await persistTagIndex({ index: tagIndex, taskId, globalStoragePath })
+}
 
-	// 2. Перестраиваем и сохраняем индекс
-	//    Полная перестройка безопаснее инкрементального обновления
-	const index = buildTagIndex(messages)
-	await persistTagIndex({ index, taskId, globalStoragePath })
+// ─── Основная функция ────────────────────────────────────────────────────────
+
+/**
+ * Рефакторинг и тегирование сообщения — единый async LLM-поток.
+ *
+ * Алгоритм:
+ * 1. setRefactoringFlag()
+ * 2. Извлечь текст сообщения и контекст
+ * 3. Вызвать LLM для декомпозиции + суммаризации + тегирования
+ * 4. Валидировать фрагменты (validateTags), пофрагментный fallback
+ * 5. Агрегировать теги на уровне сообщения
+ * 6. Сохранить атомарно (saveApiMessages + persistTagIndex)
+ * 7. finally { clearRefactoringFlag() }
+ *
+ * @param message - Сообщение для рефакторинга (обычно assistant)
+ * @param messageIndex - Индекс сообщения в массиве истории
+ * @param allMessages - Полная история сообщений (для контекста)
+ * @param apiHandler - API handler для LLM-вызова
+ * @param taskId - ID задачи
+ * @param globalStoragePath - Путь к глобальному хранилищу
+ * @param options - Опции рефакторинга
+ * @returns Результат рефакторинга с фрагментами и тегами
+ */
+export async function refactorAndTagMessage(
+	message: ApiMessage,
+	messageIndex: number,
+	allMessages: ApiMessage[],
+	apiHandler: ApiHandler,
+	taskId: string,
+	globalStoragePath: string,
+	options?: RefactorAndTagOptions,
+): Promise<RefactorAndTagResult> {
+	const maxFragments = options?.maxFragments ?? 5
+	const timeoutMs = options?.timeoutMs ?? 60000
+	const systemPrompt = options?.systemPrompt ?? REFACTOR_SYSTEM_PROMPT
+
+	// Шаг 1: Установить флаг рефакторинга
+	await setRefactoringFlag(taskId, globalStoragePath, `refactor-${messageIndex}`)
+
+	try {
+		// Шаг 2: Извлечь текст и контекст
+		const messageText = extractMessageText(message)
+		const context = extractRelevantContext(allMessages.slice(0, messageIndex))
+
+		if (!messageText.trim()) {
+			// Пустое сообщение — возвращаем fallback
+			const autoTags = generateAutoTags(message)
+			return {
+				fragments: [],
+				tags: autoTags,
+				source: "fallback",
+				cost: 0,
+			}
+		}
+
+		// Шаг 3: Вызвать LLM
+		const prompt = buildRefactoringPrompt(messageText, context, maxFragments)
+		const requestMessages: Array<{ role: "user" | "assistant"; content: string }> = [
+			{ role: "user", content: prompt },
+		]
+
+		let llmResponse = ""
+		let cost = 0
+
+		// Вызов LLM с таймаутом
+		const timeoutPromise = new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error("LLM call timed out")), timeoutMs),
+		)
+
+		const streamPromise = (async () => {
+			const stream = apiHandler.createMessage(systemPrompt, requestMessages, { taskId })
+			for await (const chunk of stream) {
+				if (chunk.type === "text") {
+					llmResponse += chunk.text
+				}
+				if (chunk.type === "usage") {
+					cost = (chunk as any).totalCost ?? 0
+				}
+			}
+		})()
+
+		await Promise.race([streamPromise, timeoutPromise])
+
+		// Шаг 4: Парсинг и валидация
+		const parsedFragments = parseLLMResponse(llmResponse)
+
+		if (!parsedFragments || parsedFragments.length === 0) {
+			// Fallback: LLM не вернул валидный ответ
+			const autoTags = generateAutoTags(message)
+			return {
+				fragments: [],
+				tags: autoTags,
+				source: "fallback",
+				cost,
+				error: "LLM response parsing failed, using auto-tags fallback",
+			}
+		}
+
+		// Пофрагментная валидация с fallback
+		const validFragments: RefactoredFragment[] = []
+		const invalidTexts: string[] = []
+
+		for (let i = 0; i < parsedFragments.length; i++) {
+			const raw = parsedFragments[i]
+			if (!raw) continue
+
+			const fragment = convertToMessageFragment(raw, message.ts ?? Date.now(), i)
+
+			if (validateTags(fragment.tags)) {
+				validFragments.push(fragment)
+			} else {
+				// Невалидный фрагмент — собираем текст для fallback
+				invalidTexts.push(raw.text)
+			}
+		}
+
+		// Если есть невалидные фрагменты — мержим их в один fallback
+		if (invalidTexts.length > 0) {
+			const fallbackText = invalidTexts.join("\n\n")
+			const fallbackTags = generateAutoTags({
+				role: "assistant",
+				content: fallbackText,
+				ts: message.ts,
+			} as ApiMessage)
+
+			validFragments.push({
+				chunk_id: `msg-${message.ts ?? Date.now()}-frag-fallback`,
+				text: fallbackText,
+				summary: "Fallback fragment (validation failed)",
+				tags: fallbackTags,
+			})
+		}
+
+		// Шаг 5: Агрегация тегов на уровне сообщения
+		const aggregatedTags = aggregateFragmentTags(validFragments)
+
+		// Шаг 6: Атомарное сохранение
+		// Обновляем сообщение с фрагментами и тегами
+		const updatedMessage: ApiMessage = {
+			...message,
+			relevance_tags: aggregatedTags,
+			fragments: validFragments.map((f) => ({
+				chunk_id: f.chunk_id,
+				tags: f.tags,
+			})),
+		}
+
+		const updatedMessages = [...allMessages]
+		updatedMessages[messageIndex] = updatedMessage
+
+		// Читаем текущий индекс и обновляем его
+		let tagIndex = await readTagIndex({ taskId, globalStoragePath })
+
+		for (const frag of validFragments) {
+			if (!frag.tags) continue
+			for (const tag of frag.tags.direct) {
+				const weight = frag.tags.weights[tag] ?? 0.5
+				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
+			}
+			for (const tag of frag.tags.depends_on) {
+				const weight = frag.tags.weights[tag] ?? 0.5
+				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
+			}
+			for (const tag of frag.tags.depended_by) {
+				const weight = frag.tags.weights[tag] ?? 0.5
+				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
+			}
+		}
+
+		await saveMessagesWithIndex(updatedMessages, tagIndex, taskId, globalStoragePath)
+
+		return {
+			fragments: validFragments,
+			tags: aggregatedTags,
+			source: "llm",
+			cost,
+		}
+	} catch (error) {
+		// Fallback при любой ошибке
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		const autoTags = generateAutoTags(message)
+
+		return {
+			fragments: [],
+			tags: autoTags,
+			source: "fallback",
+			cost: 0,
+			error: errorMessage,
+		}
+	} finally {
+		// Шаг 7: Гарантированное снятие флага
+		await clearRefactoringFlag(taskId, globalStoragePath)
+	}
 }

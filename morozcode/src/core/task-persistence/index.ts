@@ -25,3 +25,16 @@ export {
 	readTagIndex,
 	persistTagIndex,
 } from "./tagIndex"
+export {
+	refactorAndTagMessage,
+	extractMessageText,
+	extractRelevantContext,
+	buildRefactoringPrompt,
+	parseLLMResponse,
+	convertToMessageFragment,
+	aggregateFragmentTags,
+	saveMessagesWithIndex,
+	type RefactoredFragment,
+	type RefactorAndTagResult,
+	type RefactorAndTagOptions,
+} from "./messageRefactorer"
