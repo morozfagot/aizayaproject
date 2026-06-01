@@ -110,12 +110,20 @@ import { ClineProvider } from "../webview/ClineProvider"
 import { MultiSearchReplaceDiffStrategy } from "../diff/strategies/multi-search-replace"
 import {
 	type ApiMessage,
+	type TaggedApiMessage,
 	readApiMessages,
 	saveApiMessages,
 	readTaskMessages,
 	saveTaskMessages,
 	taskMetadata,
 } from "../task-persistence"
+import {
+	generatePromptTags,
+	createPromptTaggerClient,
+	type GeneratePromptTagsResult,
+	type GeneratePromptTagsOptions,
+} from "../task-persistence/promptTagger"
+import { waitForRefactoringDone } from "../task-persistence/refactoringLock"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
 import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
 import {
@@ -127,7 +135,7 @@ import {
 	checkpointDiff,
 } from "../checkpoints"
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
-import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithTags } from "../condense"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 import { AutoApprovalHandler, checkAutoApproval } from "../auto-approval"
 import { MessageManager } from "../message-manager"
@@ -311,6 +319,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// LLM Messages & Chat Messages
 	apiConversationHistory: ApiMessage[] = []
 	clineMessages: ClineMessage[] = []
+
+	// Hybrid Relevance Pipeline
+	/** Результат последнего тегирования промпта (для pre-filter в attemptApiRequest) */
+	private lastPromptTagsResult: GeneratePromptTagsResult | undefined
 
 	// Ask
 	private askResponse?: ClineAskResponse
@@ -2643,6 +2655,38 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const streamModelInfo = this.cachedStreamingModel.info
 				const cachedModelId = this.cachedStreamingModel.id
 
+				// Hybrid Relevance Pipeline: тегирование промпта перед API-запросом
+				// Извлекаем текст пользовательского промпта из currentUserContent
+				const userTextContent = currentUserContent
+					.filter((block): block is Anthropic.TextBlockParam => block.type === "text")
+					.map((block) => block.text)
+					.join("\n")
+
+				if (userTextContent.trim().length > 0) {
+					try {
+						// Получаем systemPrompt для контекста
+						const systemPrompt = await this.getSystemPrompt()
+						// Вызываем generatePromptTags() — единый LLM-поток рефакторинга + тегирования
+						this.lastPromptTagsResult = await generatePromptTags(
+							systemPrompt,
+							this.apiConversationHistory,
+							userTextContent,
+							this.api,
+							this.taskId,
+							this.globalStoragePath,
+						)
+						console.log(
+							`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
+						)
+					} catch (error) {
+						// Fallback: продолжаем без тегов
+						console.warn(
+							`[Task#${this.taskId}] generatePromptTags failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
+						)
+						this.lastPromptTagsResult = undefined
+					}
+				}
+
 				// Yields only if the first chunk is successful, otherwise will
 				// allow the user to retry the request (most likely due to rate
 				// limit error, which gets thrown on the first chunk).
@@ -4080,7 +4124,23 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Get the effective API history by filtering out condensed messages
 		// This allows non-destructive condensing where messages are tagged but not deleted,
 		// enabling accurate rewind operations while still sending condensed history to the API.
-		const effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+		// Hybrid Relevance Pipeline: если есть теги от generatePromptTags(), используем getEffectiveApiHistoryWithTags()
+		let effectiveHistory: ApiMessage[]
+		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
+			// Используем теги для pre-filter истории
+			effectiveHistory = await getEffectiveApiHistoryWithTags(
+				this.apiConversationHistory,
+				this.lastPromptTagsResult.tags,
+				this.taskId,
+				this.globalStoragePath,
+			)
+			console.log(
+				`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
+			)
+		} else {
+			// Стандартная фильтрация без тегов
+			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+		}
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
 		// For API only: merge consecutive user messages (excludes summary messages per
 		// mergeConsecutiveApiMessages implementation) without mutating stored history.

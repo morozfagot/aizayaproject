@@ -6,12 +6,12 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { t } from "../../i18n"
 import { ApiHandler, ApiHandlerCreateMessageMetadata } from "../../api"
 import { ApiMessage, RelevanceTags } from "../task-persistence/apiMessages"
-import { readTagIndex, findChunksByScore } from "../task-persistence/tagIndex"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
 import { findLast } from "../../shared/array"
 import { supportPrompt } from "../../shared/support-prompt"
 import { RooIgnoreController } from "../ignore/RooIgnoreController"
 import { generateFoldedFileContext } from "./foldedFileContext"
+import { findChunksByScore, readTagIndex } from "../task-persistence/tagIndex"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
 
@@ -641,108 +641,6 @@ export function getEffectiveApiHistory(messages: ApiMessage[]): ApiMessage[] {
 }
 
 /**
- * Extracts message timestamp (ts) from chunk_id.
- * Chunk_id format: "msg-{ts}-frag-{n}" where ts is unix timestamp in milliseconds.
- * Returns null if the format doesn't match.
- *
- * @param chunkId - The chunk identifier string
- * @returns The message timestamp or null if parsing fails
- */
-function extractTsFromChunkId(chunkId: string): number | null {
-	const match = chunkId.match(/^msg-(\d+)-frag-\d+$/)
-	return match ? parseInt(match[1], 10) : null
-}
-
-/**
- * Gets the effective API history with optional tag-based pre-filtering.
- *
- * This is the hybrid relevance pipeline entry point:
- * 1. First applies the standard getEffectiveApiHistory() filtering (condense/truncate)
- * 2. If prompt tags are provided, applies tag-based pre-filter:
- *    - Reads the TagIndex from disk
- *    - Calls findChunksByScore() with formula: score = Σ(weight_prompt × weight_fragment)
- *    - Filters by threshold k
- *    - Extracts message timestamps from chunk_ids
- *    - Filters messages to only include those with matching timestamps
- * 3. Fallback: if pre-filter returns empty, returns empty array (NOT full history)
- *
- * This function is async because it reads the TagIndex from disk.
- *
- * @param messages - The full API conversation history
- * @param promptTags - Optional relevance tags for the current prompt
- * @param taskId - Task ID for reading the tag index
- * @param globalStoragePath - Global storage path for the tag index file
- * @param threshold - Relevance threshold k (default 0.5)
- * @returns The filtered history that should be sent to the API
- */
-export async function getEffectiveApiHistoryWithTags(
-	messages: ApiMessage[],
-	promptTags?: RelevanceTags,
-	taskId?: string,
-	globalStoragePath?: string,
-	threshold: number = 0.5,
-): Promise<ApiMessage[]> {
-	// Step 1: Apply standard effective history filtering (condense/truncate)
-	const baseHistory = getEffectiveApiHistory(messages)
-
-	// Step 2: If no tags or no task info, return base history (no pre-filtering)
-	if (!promptTags || !taskId || !globalStoragePath || !promptTags.direct || promptTags.direct.length === 0) {
-		return baseHistory
-	}
-
-	try {
-		// Step 3: Read the tag index
-		const tagIndex = await readTagIndex({ taskId, globalStoragePath })
-
-		// Step 4: Find chunks by score formula: score = Σ(weight_prompt × weight_fragment)
-		const relevantChunks = findChunksByScore(tagIndex, {
-			direct: promptTags.direct,
-			weights: promptTags.weights || {},
-		}, threshold)
-
-		// Step 5: If pre-filter returned empty, return empty context (NOT full history)
-		if (relevantChunks.length === 0) {
-			return []
-		}
-
-		// Step 6: Extract message timestamps from chunk_ids
-		const relevantTimestamps = new Set<number>()
-		for (const chunk of relevantChunks) {
-			const ts = extractTsFromChunkId(chunk.chunk_id)
-			if (ts !== null) {
-				relevantTimestamps.add(ts)
-			}
-		}
-
-		// Step 7: If no valid timestamps extracted, return empty context
-		if (relevantTimestamps.size === 0) {
-			return []
-		}
-
-		// Step 8: Filter messages to only include those with matching timestamps
-		const filteredHistory = baseHistory.filter((msg) => {
-			// Always include summary and truncation marker messages
-			if (msg.isSummary || msg.isTruncationMarker) {
-				return true
-			}
-			// Include message if its ts is in the relevant set
-			return msg.ts !== undefined && relevantTimestamps.has(msg.ts)
-		})
-
-		// Step 9: If filtering removed everything, return empty context
-		if (filteredHistory.length === 0) {
-			return []
-		}
-
-		return filteredHistory
-	} catch (error) {
-		// On any error (disk read failure, parsing error, etc.), return empty context
-		console.warn(`[getEffectiveApiHistoryWithTags] Pre-filter failed, returning empty context:`, error)
-		return []
-	}
-}
-
-/**
  * Cleans up orphaned condenseParent and truncationParent references after a truncation operation (rewind/delete).
  * When a summary message or truncation marker is deleted, messages that were tagged with its ID
  * should have their parent reference cleared so they become active again.
@@ -801,4 +699,93 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
 		}
 		return msg
 	})
+}
+
+/**
+	* Извлекает timestamp сообщения из chunk_id.
+	* Формат chunk_id: "msg-{ts}-frag-{n}"
+	* Возвращает 0 если формат не распознан.
+	*/
+function extractTsFromChunkId(chunkId: string): number {
+	const match = chunkId.match(/^msg-(\d+)-frag-\d+$/)
+	return match ? parseInt(match[1], 10) : 0
+}
+
+/**
+	* Получает эффективную историю API с фильтрацией по тегам релевантности.
+	*
+	* Использует findChunksByScore() для pre-filter по тегам промпта.
+	* В отличие от getEffectiveApiHistory(), добавляет фильтрацию по релевантности:
+	* 1. Читает TagIndex из файла
+	* 2. Вызывает findChunksByScore() для получения релевантных chunk_id
+	* 3. Извлекает ts сообщений из chunk_id
+	* 4. Фильтрует сообщения: оставляет только те, чьи ts есть в релевантных
+	*
+	* Fallback: если pre-filter вернул пусто или произошла ошибка — возвращает пустой массив
+	* (НЕ полный контекст, НЕ summary).
+	*
+	* @param messages - Полная история API-сообщений
+	* @param promptTags - Теги релевантности промпта
+	* @param taskId - ID задачи
+	* @param globalStoragePath - Путь к глобальному хранилищу
+	* @param threshold - Порог k для фильтрации score (default 0.5)
+	* @returns Отфильтрованная история сообщений
+	*/
+export async function getEffectiveApiHistoryWithTags(
+	messages: ApiMessage[],
+	promptTags: RelevanceTags,
+	taskId: string,
+	globalStoragePath: string,
+	threshold: number = 0.5,
+): Promise<ApiMessage[]> {
+	// Если тегов нет — возвращаем пустой контекст (pre-filter не работает)
+	if (!promptTags.direct || promptTags.direct.length === 0) {
+		console.warn("[getEffectiveApiHistoryWithTags] No prompt tags provided, returning empty context")
+		return []
+	}
+
+	try {
+		// Шаг 1: Читаем TagIndex
+		const tagIndex = await readTagIndex({ taskId, globalStoragePath })
+
+		// Шаг 2: Находим релевантные фрагменты по score
+		const relevantChunks = findChunksByScore(tagIndex, promptTags, threshold)
+
+		// Шаг 3: Fallback если пусто
+		if (relevantChunks.length === 0) {
+			console.warn("[getEffectiveApiHistoryWithTags] No relevant chunks found, returning empty context")
+			return []
+		}
+
+		// Шаг 4: Извлекаем ts сообщений из chunk_id
+		const relevantTsSet = new Set<number>()
+		for (const chunk of relevantChunks) {
+			const ts = extractTsFromChunkId(chunk.chunk_id)
+			if (ts > 0) {
+				relevantTsSet.add(ts)
+			}
+		}
+
+		// Шаг 5: Фильтруем сообщения по ts
+		// Также применяем стандартную фильтрацию condense/truncation
+		const baseHistory = getEffectiveApiHistory(messages)
+		const filteredMessages = baseHistory.filter((msg) => {
+			// Сообщения без ts (системные) — пропускаем
+			if (!msg.ts) {
+				return true
+			}
+			// Оставляем только сообщения с релевантными ts
+			return relevantTsSet.has(msg.ts)
+		})
+
+		console.log(
+			`[getEffectiveApiHistoryWithTags] Filtered ${baseHistory.length} → ${filteredMessages.length} messages (${relevantChunks.length} relevant chunks)`,
+		)
+
+		return filteredMessages
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning empty context`)
+		return []
+	}
 }

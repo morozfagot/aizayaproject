@@ -8,15 +8,14 @@ import { MAX_CONDENSE_THRESHOLD, MIN_CONDENSE_THRESHOLD, summarizeConversation, 
 import { ApiMessage, RelevanceTags } from "../task-persistence/apiMessages"
 import { ANTHROPIC_DEFAULT_MAX_TOKENS } from "@roo-code/types"
 import { RooIgnoreController } from "../ignore/RooIgnoreController"
-import { trimContextByRelevance, estimateMessagesTokenCount } from "../../api/model-selection/prompt-adapter"
+import { findChunksByScore, readTagIndex } from "../task-persistence/tagIndex"
 
 /**
  * Context Management
  *
  * This module provides Context Management for conversations, combining:
  * - Intelligent condensation of prior messages when approaching configured thresholds
- * - Relevance-based truncation (2.9.4.1) — removes least relevant messages by tag score
- * - Sliding window truncation as a last resort fallback
+ * - Sliding window truncation as a fallback when necessary
  *
  * Behavior and exports are preserved exactly from the previous sliding-window implementation.
  */
@@ -137,108 +136,6 @@ export function truncateConversation(messages: ApiMessage[], fracToRemove: numbe
 }
 
 /**
- * Truncates a conversation by relevance score (Context Trimming by Relevance, component 2.9.4.1).
- *
- * Uses tag-based relevance scoring to remove the least relevant messages while preserving:
- * - Protected messages (system prompt, first N messages)
- * - Recent messages (last N, for conversational continuity)
- * - Most relevant messages (highest tag overlap score)
- *
- * This is a purely mathematical operation — no LLM calls.
- *
- * @param {ApiMessage[]} messages - The conversation messages.
- * @param {RelevanceTags} promptTags - Tags of the current prompt for relevance comparison.
- * @param {number} allowedTokens - Maximum tokens allowed for the conversation history.
- * @param {string} taskId - The task ID for the conversation, used for telemetry.
- * @returns {TruncationResult} Object containing the filtered messages, truncation ID, and count of messages removed.
- */
-export function truncateConversationByRelevance(
-	messages: ApiMessage[],
-	promptTags: RelevanceTags,
-	allowedTokens: number,
-	taskId: string,
-): TruncationResult {
-	TelemetryService.instance.captureSlidingWindowTruncation(taskId)
-
-	const truncationId = crypto.randomUUID()
-
-	// Filter to only visible messages (those not already truncated)
-	const visibleMessages: ApiMessage[] = []
-	messages.forEach((msg) => {
-		if (!msg.truncationParent && !msg.isTruncationMarker) {
-			visibleMessages.push(msg)
-		}
-	})
-
-	// If no prompt tags — relevance trimming is not possible, return as-is
-	if (!promptTags.direct || promptTags.direct.length === 0) {
-		return {
-			messages,
-			truncationId,
-			messagesRemoved: 0,
-		}
-	}
-
-	// Use trimContextByRelevance to get the filtered set of visible messages
-	const trimmedVisible = trimContextByRelevance(visibleMessages, {
-		targetTokens: allowedTokens,
-		promptTags,
-		preserveLastN: 3,
-		protectedIndices: new Set([0, 1]), // Protect first 2 visible messages
-	})
-
-	const messagesRemoved = visibleMessages.length - trimmedVisible.length
-
-	if (messagesRemoved <= 0) {
-		return {
-			messages,
-			truncationId,
-			messagesRemoved: 0,
-		}
-	}
-
-	// Build a set of trimmed message references for quick lookup
-	const trimmedSet = new Set(trimmedVisible)
-
-	// Map back to original messages array, tagging removed ones
-	const result: ApiMessage[] = []
-	let markerInserted = false
-
-	for (let i = 0; i < messages.length; i++) {
-		const msg = messages[i]
-		// Skip undefined entries (noUncheckedIndexedAccess) and already-truncated messages
-		if (!msg || msg.truncationParent || msg.isTruncationMarker) {
-			continue
-		}
-
-		if (trimmedSet.has(msg)) {
-			result.push(msg)
-		} else {
-			// Tag as truncated
-			if (!markerInserted) {
-				// Insert relevance truncation marker before the first kept message after removals
-				const marker: ApiMessage = {
-					role: "user",
-					content: `[Relevance truncation: ${messagesRemoved} messages removed by tag score to reduce context]`,
-					ts: msg.ts ? msg.ts - 1 : Date.now(),
-					isTruncationMarker: true,
-					truncationId,
-				}
-				result.push(marker)
-				markerInserted = true
-			}
-			result.push({ ...msg, truncationParent: truncationId })
-		}
-	}
-
-	return {
-		messages: result,
-		truncationId,
-		messagesRemoved,
-	}
-}
-
-/**
  * Options for checking if context management will likely run.
  * A subset of ContextManagementOptions with only the fields needed for threshold calculation.
  */
@@ -304,8 +201,7 @@ export function willManageContext({
  * Context Management: Conditionally manages the conversation context when approaching limits.
  *
  * Attempts intelligent condensation of prior messages when thresholds are reached.
- * Falls back to relevance-based truncation (2.9.4.1) if condensation is unavailable or fails.
- * Falls back to sliding window truncation as a last resort.
+ * Falls back to sliding window truncation if condensation is unavailable or fails.
  *
  * @param {ContextManagementOptions} options - The options for truncation/condensation
  * @returns {Promise<ApiMessage[]>} The original, condensed, or truncated conversation messages.
@@ -334,8 +230,6 @@ export type ContextManagementOptions = {
 	cwd?: string
 	/** Optional controller for file access validation */
 	rooIgnoreController?: RooIgnoreController
-	/** Optional prompt tags for relevance-based truncation (2.9.4.1). If provided, relevance trimming is attempted before sliding window. */
-	promptTags?: RelevanceTags
 }
 
 export type ContextManagementResult = SummarizeResponse & {
@@ -347,10 +241,6 @@ export type ContextManagementResult = SummarizeResponse & {
 
 /**
  * Conditionally manages conversation context (condense and fallback truncation).
- *
- * Truncation priority:
- * 1. Relevance-based truncation (if promptTags provided) — removes least relevant messages
- * 2. Sliding window truncation (last resort) — removes oldest messages
  *
  * @param {ContextManagementOptions} options - The options for truncation/condensation
  * @returns {Promise<ApiMessage[]>} The original, condensed, or truncated conversation messages.
@@ -373,7 +263,6 @@ export async function manageContext({
 	filesReadByRoo,
 	cwd,
 	rooIgnoreController,
-	promptTags,
 }: ContextManagementOptions): Promise<ContextManagementResult> {
 	let error: string | undefined
 	let errorDetails: string | undefined
@@ -383,10 +272,6 @@ export async function manageContext({
 
 	// Estimate tokens for the last message (which is always a user message)
 	const lastMessage = messages[messages.length - 1]
-	if (!lastMessage) {
-		// Empty messages array — nothing to manage
-		return { messages, summary: "", cost, prevContextTokens: totalTokens, error, errorDetails }
-	}
 	const lastMessageContent = lastMessage.content
 	const lastMessageTokens = Array.isArray(lastMessageContent)
 		? await estimateTokenCount(lastMessageContent, apiHandler)
@@ -446,54 +331,8 @@ export async function manageContext({
 		}
 	}
 
-	// Fall back to truncation if needed
+	// Fall back to sliding window truncation if needed
 	if (prevContextTokens > allowedTokens) {
-		// Strategy 1: Relevance-based truncation (2.9.4.1) — if prompt tags are available
-		if (promptTags && promptTags.direct && promptTags.direct.length > 0) {
-			const relevanceResult = truncateConversationByRelevance(
-				messages,
-				promptTags,
-				allowedTokens,
-				taskId,
-			)
-
-			// Calculate new context tokens after relevance truncation
-			const effectiveMessages = relevanceResult.messages.filter(
-				(msg) => !msg.truncationParent && !msg.isTruncationMarker,
-			)
-
-			// Include system prompt tokens so this value matches what we send to the API.
-			let newContextTokensAfterTruncation = await estimateTokenCount(
-				[{ type: "text", text: systemPrompt }],
-				apiHandler,
-			)
-
-			for (const msg of effectiveMessages) {
-				const content = msg.content
-				if (Array.isArray(content)) {
-					newContextTokensAfterTruncation += await estimateTokenCount(content, apiHandler)
-				} else if (typeof content === "string") {
-					newContextTokensAfterTruncation += await estimateTokenCount(
-						[{ type: "text", text: content }],
-						apiHandler,
-					)
-				}
-			}
-
-			return {
-				messages: relevanceResult.messages,
-				prevContextTokens,
-				summary: "",
-				cost,
-				error,
-				errorDetails,
-				truncationId: relevanceResult.truncationId,
-				messagesRemoved: relevanceResult.messagesRemoved,
-				newContextTokensAfterTruncation,
-			}
-		}
-
-		// Strategy 2: Sliding window truncation (last resort)
 		const truncationResult = truncateConversation(messages, 0.5, taskId)
 
 		// Calculate new context tokens after truncation by counting non-truncated messages
@@ -535,4 +374,127 @@ export async function manageContext({
 	}
 	// No truncation or condensation needed
 	return { messages, summary: "", cost, prevContextTokens, error, errorDetails }
+}
+
+/**
+	* Извлекает timestamp сообщения из chunk_id.
+	* Формат chunk_id: "msg-{ts}-frag-{n}"
+	* Возвращает 0 если формат не распознан.
+	*/
+function extractTsFromChunkId(chunkId: string): number {
+	const match = chunkId.match(/^msg-(\d+)-frag-\d+$/)
+	return match ? parseInt(match[1], 10) : 0
+}
+
+/**
+	* Обрезка контекста по релевантности — альтернатива sliding window.
+	*
+	* Использует findChunksByScore() для определения релевантных сообщений.
+	* В отличие от truncateConversation() (sliding window), этот метод:
+	* 1. Читает TagIndex из файла
+	* 2. Вызывает findChunksByScore() для получения релевантных chunk_id
+	* 3. Извлекает ts сообщений из chunk_id
+	* 4. Сохраняет только релевантные сообщения + первое сообщение (контекст задачи)
+	* 5. Остальные помечаются truncationParent
+	*
+	* @param messages - Полная история API-сообщений
+	* @param promptTags - Теги релевантности промпта
+	* @param taskId - ID задачи
+	* @param globalStoragePath - Путь к глобальному хранилищу
+	* @param threshold - Порог k для фильтрации score (default 0.5)
+	* @returns Результат обрезки с truncationId
+	*/
+export async function truncateConversationByRelevance(
+	messages: ApiMessage[],
+	promptTags: RelevanceTags,
+	taskId: string,
+	globalStoragePath: string,
+	threshold: number = 0.5,
+): Promise<TruncationResult> {
+	const truncationId = crypto.randomUUID()
+
+	// Если тегов нет — возвращаем без изменений
+	if (!promptTags.direct || promptTags.direct.length === 0) {
+		console.warn("[truncateConversationByRelevance] No prompt tags provided, returning unchanged")
+		return { messages, truncationId, messagesRemoved: 0 }
+	}
+
+	try {
+		// Шаг 1: Читаем TagIndex
+		const tagIndex = await readTagIndex({ taskId, globalStoragePath })
+
+		// Шаг 2: Находим релевантные фрагменты по score
+		const relevantChunks = findChunksByScore(tagIndex, promptTags, threshold)
+
+		// Шаг 3: Fallback если пусто — возвращаем без изменений
+		if (relevantChunks.length === 0) {
+			console.warn("[truncateConversationByRelevance] No relevant chunks found, returning unchanged")
+			return { messages, truncationId, messagesRemoved: 0 }
+		}
+
+		// Шаг 4: Извлекаем ts сообщений из chunk_id
+		const relevantTsSet = new Set<number>()
+		for (const chunk of relevantChunks) {
+			const ts = extractTsFromChunkId(chunk.chunk_id)
+			if (ts > 0) {
+				relevantTsSet.add(ts)
+			}
+		}
+
+		// Шаг 5: Фильтруем сообщения
+		// Первое сообщение (контекст задачи) всегда сохраняем
+		// Остальные — только если их ts в relevantTsSet
+		if (messages.length === 0) {
+			return { messages, truncationId, messagesRemoved: 0 }
+		}
+
+		const firstMessage = messages[0]!
+		const restMessages = messages.slice(1)
+
+		const keptMessages: ApiMessage[] = []
+		const truncatedMessages: ApiMessage[] = []
+
+		for (const msg of restMessages) {
+			// Пропускаем уже скрытые сообщения и маркеры
+			if (msg.truncationParent || msg.isTruncationMarker) {
+				continue
+			}
+
+			if (msg.ts && relevantTsSet.has(msg.ts)) {
+				keptMessages.push(msg)
+			} else {
+				truncatedMessages.push({ ...msg, truncationParent: truncationId })
+			}
+		}
+
+		// Собираем результат: первое + релевантные + помеченные как скрытые
+		const resultMessages: ApiMessage[] = [firstMessage, ...keptMessages, ...truncatedMessages]
+
+		// Добавляем маркер обрезки
+		const firstKeptTs = keptMessages[0]?.ts ?? Date.now()
+		const truncationMarker: ApiMessage = {
+			role: "user",
+			content: `[Relevance-based truncation: ${truncatedMessages.length} messages hidden by tag filter]`,
+			ts: firstKeptTs - 1,
+			isTruncationMarker: true,
+			truncationId,
+		}
+
+		// Вставляем маркер после первого сообщения
+		const finalMessages: ApiMessage[] = [firstMessage, truncationMarker, ...keptMessages, ...truncatedMessages]
+
+		console.log(
+			`[truncateConversationByRelevance] Truncated ${messages.length} → ${keptMessages.length + 1} messages (${truncatedMessages.length} hidden)`,
+		)
+
+		return {
+			messages: finalMessages,
+			truncationId,
+			messagesRemoved: truncatedMessages.length,
+		}
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.error(`[truncateConversationByRelevance] Error: ${errorMessage}, returning unchanged`)
+		return { messages, truncationId, messagesRemoved: 0 }
+	}
 }

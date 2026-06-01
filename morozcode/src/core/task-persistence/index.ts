@@ -38,3 +38,10 @@ export {
 	type RefactorAndTagResult,
 	type RefactorAndTagOptions,
 } from "./messageRefactorer"
+export {
+	generatePromptTags,
+	createPromptTaggerClient,
+	type GeneratePromptTagsResult,
+	type GeneratePromptTagsOptions,
+} from "./promptTagger"
+export { waitForRefactoringDone } from "./refactoringLock"
