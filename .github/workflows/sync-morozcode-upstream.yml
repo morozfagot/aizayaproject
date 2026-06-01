@@ -1,0 +1,61 @@
+name: Sync Morozcode with Upstream
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout developer branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: developer
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Save custom files
+        run: |
+          mkdir -p /tmp/custom
+          [ -f morozcode/src/core/task-persistence/relevanceTags.ts ] && cp morozcode/src/core/task-persistence/relevanceTags.ts /tmp/custom/
+          [ -f morozcode/src/core/task-persistence/tagIndex.ts ] && cp morozcode/src/core/task-persistence/tagIndex.ts /tmp/custom/
+          [ -f morozcode/src/core/task-persistence/refactoringLock.ts ] && cp morozcode/src/core/task-persistence/refactoringLock.ts /tmp/custom/
+          [ -f morozcode/src/shared/globalFileNames.ts ] && cp morozcode/src/shared/globalFileNames.ts /tmp/custom/
+          [ -f morozcode/UPSTREAM_SYNC.md ] && cp morozcode/UPSTREAM_SYNC.md /tmp/custom/
+
+      - name: Clone upstream Zoo Code
+        run: git clone --depth 1 https://github.com/ZooCodeAI/zoo-code.git /tmp/upstream
+
+      - name: Replace morozcode with upstream
+        run: |
+          rm -rf morozcode
+          mv /tmp/upstream morozcode
+
+      - name: Restore custom files
+        run: |
+          [ -f /tmp/custom/relevanceTags.ts ] && mkdir -p morozcode/src/core/task-persistence && cp /tmp/custom/relevanceTags.ts morozcode/src/core/task-persistence/
+          [ -f /tmp/custom/tagIndex.ts ] && cp /tmp/custom/tagIndex.ts morozcode/src/core/task-persistence/
+          [ -f /tmp/custom/refactoringLock.ts ] && cp /tmp/custom/refactoringLock.ts morozcode/src/core/task-persistence/
+          [ -f /tmp/custom/globalFileNames.ts ] && mkdir -p morozcode/src/shared && cp /tmp/custom/globalFileNames.ts morozcode/src/shared/
+          [ -f /tmp/custom/UPSTREAM_SYNC.md ] && cp /tmp/custom/UPSTREAM_SYNC.md morozcode/
+          rm -rf /tmp/custom
+
+      - name: Commit and push to developer
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git commit -m "Sync morozcode with upstream Zoo Code"
+          git push origin developer
