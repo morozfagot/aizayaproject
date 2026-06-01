@@ -62,6 +62,14 @@ import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "..
 import { ApiStream, GroundingSource } from "../../api/transform/stream"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
 
+// model-selection (dynamic model selection)
+import {
+	ModelRegistry,
+	PromptAnalyzer,
+	dynamicModelSelection,
+	ModelOverloadError,
+} from "../../api/model-selection"
+
 // shared
 import { findLastIndex } from "../../shared/array"
 import { combineApiRequests } from "../../shared/combineApiRequests"
@@ -126,7 +134,9 @@ import {
 	checkpointDiff,
 } from "../checkpoints"
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
-import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithTags } from "../condense"
+import { generatePromptTags, type GeneratePromptTagsOptions } from "../task-persistence/promptTagger"
+import { waitForRefactoringDone } from "../task-persistence/refactoringLock"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 import { AutoApprovalHandler, checkAutoApproval } from "../auto-approval"
 import { MessageManager } from "../message-manager"
@@ -269,6 +279,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	abort: boolean = false
 	currentRequestAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
+
+	/**
+	 * Предупреждение о перегрузке моделей — ни одна модель не справляется с задачей.
+	 * Заполняется при ModelOverloadError для сигнализации Team Leader'у.
+	 */
+	overloadWarning?: {
+		promptTokens: number
+		complexity: string
+		taskType: string
+		attemptedShrink: boolean
+		availableModelsCount: number
+	}
 
 	// TaskStatus
 	idleAsk?: ClineMessage
@@ -4073,10 +4095,63 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			}
 		}
 
-		// Get the effective API history by filtering out condensed messages
-		// This allows non-destructive condensing where messages are tagged but not deleted,
-		// enabling accurate rewind operations while still sending condensed history to the API.
-		const effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+		// Hybrid relevance pipeline:
+		// 1. Wait for refactoring to complete (if in progress)
+		// 2. Generate prompt tags via LLM (refactor + tag)
+		// 3. Pre-filter history by tags using score formula
+		await waitForRefactoringDone({
+			taskId: this.taskId,
+			globalStoragePath: this.globalStoragePath,
+		})
+
+		// Use existing systemPrompt variable from outer scope
+		const sysPrompt = typeof systemPrompt !== "undefined" ? systemPrompt : ""
+		const lastMessages = this.apiConversationHistory
+			.slice(-3)
+			.map((msg) => ({
+				role: msg.role || "unknown",
+				content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+			}))
+		const currentUserPrompt = this.apiConversationHistory.length > 0
+			? this.apiConversationHistory[this.apiConversationHistory.length - 1]
+			: null
+		const currentPromptText = currentUserPrompt && typeof currentUserPrompt.content === "string"
+			? currentUserPrompt.content
+			: ""
+
+		// Create adapter that wraps this.api to match SingleCompletionHandler interface
+		const taskThis = this
+		const promptTaggerClient = {
+			async completePrompt(prompt: string): Promise<string> {
+				const stream = taskThis.api.createMessage(
+					prompt,
+					[],
+					{ mode: "code", taskId: taskThis.taskId },
+				)
+				let result = ""
+				for await (const chunk of stream) {
+					if (chunk.type === "text" && "text" in chunk) {
+						result += (chunk as { text: string }).text
+					}
+				}
+				return result
+			},
+		}
+
+		const { refinedPrompt, tags: promptTags } = await generatePromptTags({
+			systemPrompt: sysPrompt,
+			recentMessages: lastMessages,
+			currentPrompt: currentPromptText,
+			apiHandler: promptTaggerClient,
+		})
+
+		const effectiveHistory = await getEffectiveApiHistoryWithTags(
+			this.apiConversationHistory,
+			promptTags.source === "llm" ? promptTags : undefined,
+			this.taskId,
+			this.globalStoragePath,
+			0.5, // threshold k
+		)
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
 		// For API only: merge consecutive user messages (excludes summary messages per
 		// mergeConsecutiveApiMessages implementation) without mutating stored history.
@@ -4153,6 +4228,100 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				: {}),
 		}
 
+		// Dynamic Model Selection — choose optimal model before API call.
+		let selectedModelId: string | undefined
+		let selectedTemperature: number | undefined
+		let adaptedPrompt: string | undefined
+		let dynamicApiHandler: ApiHandler | undefined
+
+		try {
+			// Build the enriched prompt text from the conversation history.
+			const promptText = cleanConversationHistory
+				.map((m) => {
+					if (typeof m === "object" && m !== null && "content" in m) {
+						const content = m.content
+						if (typeof content === "string") return content
+						if (Array.isArray(content)) {
+							return content
+								.filter((c) => typeof c === "object" && c !== null && "type" in c && c.type === "text")
+								.map((c) => (c as { text: string }).text)
+								.join("\n")
+						}
+					}
+					return ""
+				})
+				.filter(Boolean)
+				.join("\n")
+				.slice(-8000) // Limit to last 8K chars for analysis
+
+			if (promptText.length > 100) {
+				// Initialize registry and analyzer lazily.
+				const modelRegistry = new ModelRegistry()
+
+				// Create an adapter client that wraps this.api with completePrompt.
+				const taskThis = this
+				const analyzerClient: { completePrompt: (prompt: string) => Promise<string> } = {
+					async completePrompt(prompt: string): Promise<string> {
+						// Use the current apiHandler to complete the prompt.
+						// This is a simplified adapter — in production, you may want
+						// to use a dedicated lightweight model for analysis.
+						const stream = taskThis.api.createMessage(
+							"You are a prompt analyzer. Return only JSON.",
+							[{ role: "user", content: prompt }],
+							{ mode: "code", taskId: taskThis.taskId },
+						)
+						let result = ""
+						for await (const chunk of stream) {
+							if (chunk.type === "text" && "text" in chunk) {
+								result += (chunk as { text: string }).text
+							}
+						}
+						return result
+					},
+				}
+
+				const promptAnalyzer = new PromptAnalyzer(analyzerClient)
+
+				const selection = await dynamicModelSelection(promptText, modelRegistry, promptAnalyzer, {
+					preferredProvider: this.apiConfiguration?.apiProvider,
+				})
+
+				selectedModelId = selection.model.id
+				selectedTemperature = selection.temperature
+				adaptedPrompt = selection.adaptedPrompt
+
+				console.log(
+					`[Task#${this.taskId}] DynamicModelSelection: model=${selectedModelId}, temp=${selectedTemperature}, adapted=${adaptedPrompt ? "yes" : "no"}`,
+				)
+
+				// Build a new API handler for the selected model.
+				dynamicApiHandler = buildApiHandler({
+					...this.apiConfiguration,
+					apiModelId: selectedModelId,
+					openRouterModelId: selectedModelId,
+				})
+			}
+		} catch (err) {
+			if (err instanceof ModelOverloadError) {
+				// Ни одна модель не справляется — сигнализируем Team Leader'у.
+				// Два пути: (1) обрезка контекста если декомпозиция невозможна,
+				// (2) декомпозиция через Team Leader если возможна.
+				console.error(
+					`[Task#${this.taskId}] ModelOverload: ${err.message}`,
+					JSON.stringify(err.analysis),
+				)
+				this.overloadWarning = err.analysis
+			} else {
+				// Остальные ошибки (сетевые, парсинг и т.д.) — fallback на дефолтную модель.
+				console.warn(`[Task#${this.taskId}] DynamicModelSelection failed, using default model:`, err)
+			}
+		}
+
+		// If dynamic selection didn't produce a handler, use the default.
+		if (!dynamicApiHandler) {
+			dynamicApiHandler = this.api
+		}
+
 		// Create an AbortController to allow cancelling the request mid-stream
 		this.currentRequestAbortController = new AbortController()
 		const abortSignal = this.currentRequestAbortController.signal
@@ -4160,10 +4329,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.skipPrevResponseIdOnce = false
 
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
-		const stream = this.api.createMessage(
+		const finalMetadata: ApiHandlerCreateMessageMetadata = {
+			...metadata,
+			...(selectedTemperature !== undefined ? { temperature: selectedTemperature } : {}),
+		}
+
+		const stream = dynamicApiHandler.createMessage(
 			systemPrompt,
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
-			metadata,
+			finalMetadata,
 		)
 		const iterator = stream[Symbol.asyncIterator]()
 
