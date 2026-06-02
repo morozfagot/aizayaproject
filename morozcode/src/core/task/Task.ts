@@ -1,4 +1,4 @@
-import * as path from "path"
+﻿import * as path from "path"
 import * as vscode from "vscode"
 import os from "os"
 import crypto from "crypto"
@@ -4152,18 +4152,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Hybrid Relevance Pipeline: ���� ���� ���� �� generatePromptTags(), ���������� getEffectiveApiHistoryWithTags()
 		let effectiveHistory: ApiMessage[]
 		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
-			// ���������� ���� ��� pre-filter �������
-			effectiveHistory = await getEffectiveApiHistoryWithTags(
+			const tagFilteredHistory = await getEffectiveApiHistoryWithTags(
 				this.apiConversationHistory,
 				this.lastPromptTagsResult.tags,
 				this.taskId,
 				this.globalStoragePath,
 			)
-			console.log(
-				`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
-			)
+			// Fallback: tag-filter must not zero out context
+			if (tagFilteredHistory.length > 0) {
+				effectiveHistory = tagFilteredHistory
+				console.log(
+					`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
+				)
+			} else {
+				console.warn(
+					`[Task#${this.taskId}] Tag-filtered history is empty, falling back to standard history`,
+				)
+				effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+			}
 		} else {
-			// ����������� ���������� ��� �����
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)

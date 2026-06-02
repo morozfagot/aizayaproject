@@ -738,10 +738,10 @@ export async function getEffectiveApiHistoryWithTags(
 	globalStoragePath: string,
 	threshold: number = 0.5,
 ): Promise<ApiMessage[]> {
-	// Если тегов нет — возвращаем пустой контекст (pre-filter не работает)
+	// Если тегов нет — возвращаем полную историю как fallback (pre-filter не работает)
 	if (!promptTags.direct || promptTags.direct.length === 0) {
-		console.warn("[getEffectiveApiHistoryWithTags] No prompt tags provided, returning empty context")
-		return []
+		console.warn("[getEffectiveApiHistoryWithTags] No prompt tags provided, returning full history as fallback")
+		return getEffectiveApiHistory(messages)
 	}
 
 	try {
@@ -751,10 +751,10 @@ export async function getEffectiveApiHistoryWithTags(
 		// Шаг 2: Находим релевантные фрагменты по score
 		const relevantChunks = findChunksByScore(tagIndex, promptTags, threshold)
 
-		// Шаг 3: Fallback если пусто
+		// Шаг 3: Fallback если пусто — возвращаем полную историю
 		if (relevantChunks.length === 0) {
-			console.warn("[getEffectiveApiHistoryWithTags] No relevant chunks found, returning empty context")
-			return []
+			console.warn("[getEffectiveApiHistoryWithTags] No relevant chunks found, returning full history as fallback")
+			return getEffectiveApiHistory(messages)
 		}
 
 		// Шаг 4: Извлекаем ts сообщений из chunk_id
@@ -785,7 +785,7 @@ export async function getEffectiveApiHistoryWithTags(
 		return filteredMessages
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
-		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning empty context`)
-		return []
+		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning full history as fallback`)
+		return getEffectiveApiHistory(messages)
 	}
 }
