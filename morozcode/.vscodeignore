@@ -1,0 +1,77 @@
+# Исходный код TypeScript
+**/*.ts
+!**/*.d.ts
+
+# Source maps
+**/*.map
+
+# Конфигурационные файлы разработки
+.vscode/**
+.vscode-test/**
+.gitignore
+.gitattributes
+.tool-versions
+.nvmrc
+.prettierrc.json
+.eslintrc.*
+tsconfig*.json
+turbo.json
+knip.json
+renovate.json
+codecov.yml
+ellipsis.yaml
+
+# CI/CD
+.github/**
+.husky/**
+.changeset/**
+
+# Документация (кроме README.md и CHANGELOG.md)
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+PRIVACY.md
+UPSTREAM_SYNC.md
+VERIFICATION_REPORT.md
+AGENTS.md
+.rooignore
+.roomodes
+.roo/**
+
+# Тесты
+**/*.test.ts
+**/*.spec.ts
+**/__tests__/**
+**/tests/**
+
+# Зависимости разработки
+node_modules/**
+.pnpm-store/**
+
+# Билд-артефакты
+out/**
+bin/**
+dist/**
+*.vsix
+
+# IDE
+.idea/**
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
+logs/**
+
+# Временные files
+tmp/**
+temp/**
+.cache/**
+
+# Скрипты разработки
+scripts/**

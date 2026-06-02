@@ -1,14 +1,17 @@
-# Zoo Code Changelog
+# Morozcode Changelog
 
-## 3.55.1
+## 1.0.0
 
-### Patch Changes
+### Initial Release
 
-- Fix API requests hanging indefinitely on VS Code 1.122.0+ when Zoo Code could not find the bundled ripgrep binary after the `@vscode/ripgrep-universal` rename (#381 by @greatgradz-svg, PR #248 by @0xMink).
+- First release of Morozcode - a customized fork of Roo Code/Zoo Code
+- Custom modes: Team Leader, Code, Ask, Debug, Orchestrator, Git, Hypothesizer, Critic, Task Generator, Session Architect, Archivist
+- Hybrid RAG with relevance tags
+- Dynamic Model Selection
 
-All notable changes to Zoo Code will be documented in this file.
+All notable changes to Morozcode will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Zoo Code uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Morozcode uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## 3.55.0
 
