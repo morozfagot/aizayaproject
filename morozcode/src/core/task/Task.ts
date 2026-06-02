@@ -1,4 +1,4 @@
-﻿import * as path from "path"
+import * as path from "path"
 import * as vscode from "vscode"
 import os from "os"
 import crypto from "crypto"
@@ -116,6 +116,7 @@ import {
 	readTaskMessages,
 	saveTaskMessages,
 	taskMetadata,
+	refactorAndTagMessage,
 } from "../task-persistence"
 import {
 	generatePromptTags,
@@ -321,7 +322,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	clineMessages: ClineMessage[] = []
 
 	// Hybrid Relevance Pipeline
-	/** Результат последнего тегирования промпта (для pre-filter в attemptApiRequest) */
+	/** ��������� ���������� ����������� ������� (��� pre-filter � attemptApiRequest) */
 	private lastPromptTagsResult: GeneratePromptTagsResult | undefined
 
 	// Ask
@@ -1968,7 +1969,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					// intact. The summary message carries critical metadata (isSummary, condenseId)
 					// that getEffectiveApiHistory() uses to filter out condensed messages.
 					// Removing or merging it would destroy this metadata, causing all condensed
-					// messages to become "orphaned" and restored to active status вЂ” effectively
+					// messages to become "orphaned" and restored to active status — effectively
 					// undoing the condensation and sending the full history to the API.
 					// See: https://github.com/RooCodeInc/Roo-Code/issues/11487
 					modifiedApiConversationHistory = [...existingApiConversationHistory]
@@ -2655,8 +2656,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const streamModelInfo = this.cachedStreamingModel.info
 				const cachedModelId = this.cachedStreamingModel.id
 
-				// Hybrid Relevance Pipeline: тегирование промпта перед API-запросом
-				// Извлекаем текст пользовательского промпта из currentUserContent
+				// Hybrid Relevance Pipeline: ����������� ������� ����� API-��������
+				// ��������� ����� ����������������� ������� �� currentUserContent
 				const userTextContent = currentUserContent
 					.filter((block): block is Anthropic.TextBlockParam => block.type === "text")
 					.map((block) => block.text)
@@ -2664,9 +2665,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				if (userTextContent.trim().length > 0) {
 					try {
-						// Получаем systemPrompt для контекста
+						// �������� systemPrompt ��� ���������
 						const systemPrompt = await this.getSystemPrompt()
-						// Вызываем generatePromptTags() — единый LLM-поток рефакторинга + тегирования
+						// �������� generatePromptTags() � ������ LLM-����� ������������ + �����������
 						this.lastPromptTagsResult = await generatePromptTags(
 							systemPrompt,
 							this.apiConversationHistory,
@@ -2679,7 +2680,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
 						)
 					} catch (error) {
-						// Fallback: продолжаем без тегов
+						// Fallback: ���������� ��� �����
 						console.warn(
 							`[Task#${this.taskId}] generatePromptTags failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
 						)
@@ -3063,7 +3064,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								})
 
 								// Zoo Code observability telemetry
-								import("../../services/zoo-telemetry")
+								import("../../services/morozcode-telemetry")
 									.then(async ({ sendLlmTelemetry }) => {
 										const mode = await this.getTaskMode().catch(() => "unknown")
 										return sendLlmTelemetry({
@@ -3484,7 +3485,31 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						reasoningMessage || undefined,
 					)
 					this.assistantMessageSavedToHistory = true
-
+	
+					// RAG Step 6: Рефакторинг и тегирование ответа модели
+					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
+					try {
+						const lastMessageIndex = this.apiConversationHistory.length - 1
+						if (lastMessageIndex >= 0) {
+							const lastMessage = this.apiConversationHistory[lastMessageIndex]!
+							await refactorAndTagMessage(
+								lastMessage,
+								lastMessageIndex,
+								this.apiConversationHistory,
+								this.api,
+								this.taskId,
+								this.globalStoragePath,
+								{ model: "openrouter/owl-alpha" }, // Фиксированная модель для тегирования (будет заменена позже)
+							)
+							console.log(`[Task#${this.taskId}] refactorAndTagMessage completed for message ${lastMessageIndex}`)
+						}
+					} catch (error) {
+						// Fallback: продолжаем без тегирования
+						console.warn(
+							`[Task#${this.taskId}] refactorAndTagMessage failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
+						)
+					}
+	
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
 				}
 
@@ -3941,7 +3966,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		// Update last request time right before making the request so that subsequent
-		// requests вЂ” even from new subtasks вЂ” will honour the provider's rate-limit.
+		// requests — even from new subtasks — will honour the provider's rate-limit.
 		//
 		// NOTE: When recursivelyMakeClineRequests handles rate limiting, it sets the
 		// timestamp earlier to include the environment details build. We still set it
@@ -4124,10 +4149,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Get the effective API history by filtering out condensed messages
 		// This allows non-destructive condensing where messages are tagged but not deleted,
 		// enabling accurate rewind operations while still sending condensed history to the API.
-		// Hybrid Relevance Pipeline: если есть теги от generatePromptTags(), используем getEffectiveApiHistoryWithTags()
+		// Hybrid Relevance Pipeline: ���� ���� ���� �� generatePromptTags(), ���������� getEffectiveApiHistoryWithTags()
 		let effectiveHistory: ApiMessage[]
 		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
-			// Используем теги для pre-filter истории
+			// ���������� ���� ��� pre-filter �������
 			effectiveHistory = await getEffectiveApiHistoryWithTags(
 				this.apiConversationHistory,
 				this.lastPromptTagsResult.tags,
@@ -4138,7 +4163,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
 			)
 		} else {
-			// Стандартная фильтрация без тегов
+			// ����������� ���������� ��� �����
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
