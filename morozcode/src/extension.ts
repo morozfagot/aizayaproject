@@ -49,7 +49,7 @@ import {
 } from "./activate"
 import { initializeI18n } from "./i18n"
 import { initializeModelCacheRefresh } from "./api/providers/fetchers/modelCache"
-import { initZooCodeAuth } from "./services/zoo-code-auth"
+import { initZooCodeAuth } from "./services/morozcode-auth"
 
 /**
  * Built using https://github.com/microsoft/vscode-webview-ui-toolkit

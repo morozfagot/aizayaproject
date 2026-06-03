@@ -2,10 +2,10 @@ import * as vscode from "vscode"
 
 import { t } from "../i18n"
 
-const ZOO_CODE_TOKEN_KEY = "zoo-code-session-token"
-const ZOO_CODE_USER_NAME_KEY = "zoo-code-user-name"
-const ZOO_CODE_USER_EMAIL_KEY = "zoo-code-user-email"
-const ZOO_CODE_USER_IMAGE_KEY = "zoo-code-user-image"
+const MOROZCODE_TOKEN_KEY = "morozcode-session-token"
+const MOROZCODE_USER_NAME_KEY = "morozcode-user-name"
+const MOROZCODE_USER_EMAIL_KEY = "morozcode-user-email"
+const MOROZCODE_USER_IMAGE_KEY = "morozcode-user-image"
 
 let secretStorage: vscode.SecretStorage | undefined
 
@@ -27,10 +27,10 @@ export async function initZooCodeAuth(context: vscode.ExtensionContext): Promise
 	secretStorage = context.secrets
 
 	// Pre-load the token and user info into memory on init so ZooCodeHandler can access them synchronously
-	_cachedToken = await secretStorage.get(ZOO_CODE_TOKEN_KEY)
-	_cachedUserName = await secretStorage.get(ZOO_CODE_USER_NAME_KEY)
-	_cachedUserEmail = await secretStorage.get(ZOO_CODE_USER_EMAIL_KEY)
-	_cachedUserImage = await secretStorage.get(ZOO_CODE_USER_IMAGE_KEY)
+	_cachedToken = await secretStorage.get(MOROZCODE_TOKEN_KEY)
+	_cachedUserName = await secretStorage.get(MOROZCODE_USER_NAME_KEY)
+	_cachedUserEmail = await secretStorage.get(MOROZCODE_USER_EMAIL_KEY)
+	_cachedUserImage = await secretStorage.get(MOROZCODE_USER_IMAGE_KEY)
 
 	// Validate persisted auth state on init before reporting the user as connected.
 	if (_cachedToken) {
@@ -51,8 +51,8 @@ export async function initZooCodeAuth(context: vscode.ExtensionContext): Promise
 
 	// Watch for secret changes and update cache
 	context.secrets.onDidChange((e) => {
-		if (e.key === ZOO_CODE_TOKEN_KEY) {
-			secretStorage?.get(ZOO_CODE_TOKEN_KEY).then((token) => {
+		if (e.key === MOROZCODE_TOKEN_KEY) {
+			secretStorage?.get(MOROZCODE_TOKEN_KEY).then((token) => {
 				_cachedToken = token
 				// Reset subscription status when token changes
 				_cachedSubscriptionStatus = "unknown"
@@ -62,18 +62,18 @@ export async function initZooCodeAuth(context: vscode.ExtensionContext): Promise
 				}
 			})
 		}
-		if (e.key === ZOO_CODE_USER_NAME_KEY) {
-			secretStorage?.get(ZOO_CODE_USER_NAME_KEY).then((name) => {
+		if (e.key === MOROZCODE_USER_NAME_KEY) {
+			secretStorage?.get(MOROZCODE_USER_NAME_KEY).then((name) => {
 				_cachedUserName = name
 			})
 		}
-		if (e.key === ZOO_CODE_USER_EMAIL_KEY) {
-			secretStorage?.get(ZOO_CODE_USER_EMAIL_KEY).then((email) => {
+		if (e.key === MOROZCODE_USER_EMAIL_KEY) {
+			secretStorage?.get(MOROZCODE_USER_EMAIL_KEY).then((email) => {
 				_cachedUserEmail = email
 			})
 		}
-		if (e.key === ZOO_CODE_USER_IMAGE_KEY) {
-			secretStorage?.get(ZOO_CODE_USER_IMAGE_KEY).then((image) => {
+		if (e.key === MOROZCODE_USER_IMAGE_KEY) {
+			secretStorage?.get(MOROZCODE_USER_IMAGE_KEY).then((image) => {
 				_cachedUserImage = image
 			})
 		}
@@ -146,12 +146,12 @@ export async function checkSubscriptionStatus(): Promise<"active" | "inactive" |
 
 export async function getZooCodeToken(): Promise<string | undefined> {
 	if (!secretStorage) return undefined
-	return secretStorage.get(ZOO_CODE_TOKEN_KEY)
+	return secretStorage.get(MOROZCODE_TOKEN_KEY)
 }
 
 export async function setZooCodeToken(token: string): Promise<void> {
 	if (!secretStorage) return
-	await secretStorage.store(ZOO_CODE_TOKEN_KEY, token)
+	await secretStorage.store(MOROZCODE_TOKEN_KEY, token)
 	_cachedToken = token
 	// Reset subscription status when token is set
 	_cachedSubscriptionStatus = "unknown"
@@ -166,35 +166,35 @@ export async function setZooCodeUserInfo(info: {
 	if (!secretStorage) return
 
 	if (info.name) {
-		await secretStorage.store(ZOO_CODE_USER_NAME_KEY, info.name)
+		await secretStorage.store(MOROZCODE_USER_NAME_KEY, info.name)
 		_cachedUserName = info.name
 	} else if (info.name === null) {
-		await secretStorage.delete(ZOO_CODE_USER_NAME_KEY)
+		await secretStorage.delete(MOROZCODE_USER_NAME_KEY)
 		_cachedUserName = undefined
 	}
 
 	if (info.email) {
-		await secretStorage.store(ZOO_CODE_USER_EMAIL_KEY, info.email)
+		await secretStorage.store(MOROZCODE_USER_EMAIL_KEY, info.email)
 		_cachedUserEmail = info.email
 	} else if (info.email === null) {
-		await secretStorage.delete(ZOO_CODE_USER_EMAIL_KEY)
+		await secretStorage.delete(MOROZCODE_USER_EMAIL_KEY)
 		_cachedUserEmail = undefined
 	}
 
 	if (info.image) {
-		await secretStorage.store(ZOO_CODE_USER_IMAGE_KEY, info.image)
+		await secretStorage.store(MOROZCODE_USER_IMAGE_KEY, info.image)
 		_cachedUserImage = info.image
 	} else if (info.image === null) {
-		await secretStorage.delete(ZOO_CODE_USER_IMAGE_KEY)
+		await secretStorage.delete(MOROZCODE_USER_IMAGE_KEY)
 		_cachedUserImage = undefined
 	}
 }
 
 export async function clearZooCodeUserInfo(): Promise<void> {
 	if (!secretStorage) return
-	await secretStorage.delete(ZOO_CODE_USER_NAME_KEY)
-	await secretStorage.delete(ZOO_CODE_USER_EMAIL_KEY)
-	await secretStorage.delete(ZOO_CODE_USER_IMAGE_KEY)
+	await secretStorage.delete(MOROZCODE_USER_NAME_KEY)
+	await secretStorage.delete(MOROZCODE_USER_EMAIL_KEY)
+	await secretStorage.delete(MOROZCODE_USER_IMAGE_KEY)
 	_cachedUserName = undefined
 	_cachedUserEmail = undefined
 	_cachedUserImage = undefined
@@ -202,7 +202,7 @@ export async function clearZooCodeUserInfo(): Promise<void> {
 
 export async function clearZooCodeToken(): Promise<void> {
 	if (!secretStorage) return
-	await secretStorage.delete(ZOO_CODE_TOKEN_KEY)
+	await secretStorage.delete(MOROZCODE_TOKEN_KEY)
 	_cachedToken = undefined
 	_cachedSubscriptionStatus = "unknown"
 	_lastSubscriptionCheck = 0

@@ -2,7 +2,7 @@ import * as vscode from "vscode"
 
 import { getRouterUnavailableSignInMessage } from "../core/config/routerRemoval"
 import { ClineProvider } from "../core/webview/ClineProvider"
-import { handleAuthCallback as handleZooCodeAuthCallback, setZooCodeUserInfo } from "../services/zoo-code-auth"
+import { handleAuthCallback as handleZooCodeAuthCallback, setZooCodeUserInfo } from "../services/morozcode-auth"
 
 export const handleUri = async (uri: vscode.Uri) => {
 	const path = uri.path

@@ -439,10 +439,10 @@ describe("OpenAiCodexHandler native tool calls", () => {
 			expect.anything(),
 			expect.objectContaining({
 				headers: expect.objectContaining({
-					originator: "zoo-code",
+					originator: "morozcode",
 					session_id: "task-123",
 					"ChatGPT-Account-Id": "acct_test",
-					"User-Agent": expect.stringContaining(`zoo-code/${Package.version}`),
+					"User-Agent": expect.stringContaining(`morozcode/${Package.version}`),
 				}),
 			}),
 		)
@@ -487,10 +487,10 @@ describe("OpenAiCodexHandler native tool calls", () => {
 			expect.stringContaining("/responses"),
 			expect.objectContaining({
 				headers: expect.objectContaining({
-					originator: "zoo-code",
+					originator: "morozcode",
 					session_id: "task-456",
 					"ChatGPT-Account-Id": "acct_test",
-					"User-Agent": expect.stringContaining(`zoo-code/${Package.version}`),
+					"User-Agent": expect.stringContaining(`morozcode/${Package.version}`),
 				}),
 			}),
 		)
@@ -519,9 +519,9 @@ describe("OpenAiCodexHandler native tool calls", () => {
 			expect.stringContaining("/responses"),
 			expect.objectContaining({
 				headers: expect.objectContaining({
-					originator: "zoo-code",
+					originator: "morozcode",
 					"ChatGPT-Account-Id": "acct_test",
-					"User-Agent": expect.stringContaining(`zoo-code/${Package.version}`),
+					"User-Agent": expect.stringContaining(`morozcode/${Package.version}`),
 					session_id: expect.any(String),
 				}),
 			}),

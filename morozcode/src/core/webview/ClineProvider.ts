@@ -2143,7 +2143,7 @@ export class ClineProvider
 
 		try {
 			const { isZooCodeAuthenticated, getCachedZooCodeUserInfo, getZooCodeBaseUrl } = await import(
-				"../../services/zoo-code-auth"
+				"../../services/morozcode-auth"
 			)
 			const userInfo = getCachedZooCodeUserInfo()
 			zooCodeState = {

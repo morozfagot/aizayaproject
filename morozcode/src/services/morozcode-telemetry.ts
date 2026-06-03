@@ -3,7 +3,7 @@ import {
 	getZooCodeBaseUrl,
 	getCachedSubscriptionStatus,
 	checkSubscriptionStatus,
-} from "./zoo-code-auth"
+} from "./morozcode-auth"
 import { Package } from "../shared/package"
 
 export type LlmTelemetryPayload = {

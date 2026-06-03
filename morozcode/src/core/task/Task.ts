@@ -2683,27 +2683,42 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					.join("\n")
 
 				if (userTextContent.trim().length > 0) {
-					try {
-						// �������� systemPrompt ��� ���������
-						const systemPrompt = await this.getSystemPrompt()
-						// �������� generatePromptTags() � ������ LLM-����� ������������ + �����������
-						this.lastPromptTagsResult = await generatePromptTags(
-							systemPrompt,
-							this.apiConversationHistory,
-							userTextContent,
-							this.api,
-							this.taskId,
-							this.globalStoragePath,
+					const systemPrompt = await this.getSystemPrompt()
+
+					// Retry-loop: up to 2 attempts to get tags
+					const maxRetries = 2
+					let lastError: Error | undefined
+
+					for (let attempt = 1; attempt <= maxRetries; attempt++) {
+						try {
+							this.lastPromptTagsResult = await generatePromptTags(
+								systemPrompt,
+								this.apiConversationHistory,
+								userTextContent,
+								this.api,
+								this.taskId,
+								this.globalStoragePath,
+							)
+							console.log(
+								`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
+							)
+							lastError = undefined
+							break
+						} catch (error) {
+							lastError = error instanceof Error ? error : new Error(String(error))
+							console.warn(
+								`[Task#${this.taskId}] generatePromptTags attempt ${attempt}/${maxRetries} failed: ${lastError.message}`,
+							)
+							if (attempt < maxRetries) {
+								await new Promise((resolve) => setTimeout(resolve, 1000))
+							}
+						}
+					}
+
+					if (lastError) {
+						throw new Error(
+							`[Task#${this.taskId}] generatePromptTags failed after ${maxRetries} attempts: ${lastError.message}`,
 						)
-						console.log(
-							`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
-						)
-					} catch (error) {
-						// Fallback: ���������� ��� �����
-						console.warn(
-							`[Task#${this.taskId}] generatePromptTags failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
-						)
-						this.lastPromptTagsResult = undefined
 					}
 				}
 

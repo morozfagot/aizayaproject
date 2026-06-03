@@ -15,7 +15,7 @@ import {
 	setZooCodeToken,
 	setZooCodeUserInfo,
 	verifyZooCodeToken,
-} from "../zoo-code-auth"
+} from "../morozcode-auth"
 
 vi.mock("vscode", () => ({
 	workspace: {
@@ -36,7 +36,7 @@ vi.mock("../i18n", () => ({
 const mockFetch = vi.fn()
 global.fetch = mockFetch as any
 
-describe("zoo-code-auth", () => {
+describe("morozcode-auth", () => {
 	let mockSecrets: any
 	let mockContext: any
 

@@ -2444,7 +2444,7 @@ export const webviewMessageHandler = async (
 		}
 		case "zooCodeSignOut": {
 			try {
-				const { disconnectZooCode } = await import("../../services/zoo-code-auth")
+				const { disconnectZooCode } = await import("../../services/morozcode-auth")
 				await disconnectZooCode()
 				await provider.postStateToWebview()
 			} catch (error) {

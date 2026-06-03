@@ -12,14 +12,14 @@ const {
 	mockGetZooCodeBaseUrl: vi.fn(),
 }))
 
-vi.mock("../zoo-code-auth", () => ({
+vi.mock("../morozcode-auth", () => ({
 	checkSubscriptionStatus: mockCheckSubscriptionStatus,
 	getCachedSubscriptionStatus: mockGetCachedSubscriptionStatus,
 	getCachedZooCodeToken: mockGetCachedZooCodeToken,
 	getZooCodeBaseUrl: mockGetZooCodeBaseUrl,
 }))
 
-import { sendLlmTelemetry } from "../zoo-telemetry"
+import { sendLlmTelemetry } from "../morozcode-telemetry"
 
 describe("sendLlmTelemetry", () => {
 	const payload = {

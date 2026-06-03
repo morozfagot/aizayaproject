@@ -249,7 +249,7 @@ export async function generatePromptTags(
 	options?: GeneratePromptTagsOptions,
 ): Promise<GeneratePromptTagsResult> {
 	const maxContextMessages = options?.maxContextMessages ?? 5
-	const timeoutMs = options?.timeoutMs ?? 60000
+	const timeoutMs = options?.timeoutMs ?? 30000
 	const systemPromptForTagger = options?.systemPrompt ?? PROMPT_TAGGER_SYSTEM_PROMPT
 
 	// Шаг 1: Ждём завершения рефакторинга БД
@@ -287,13 +287,13 @@ export async function generatePromptTags(
 			return result
 		}
 
-		// Fallback: LLM не вернул валидный ответ
+		// Fallback: LLM вернул ответ, но парсинг не удался
 		console.warn("[generatePromptTags] LLM response parsing failed, using fallback")
 		return createFallbackResult(currentPrompt)
 	} catch (error) {
-		// Fallback при любой ошибке
+		// Ошибка LLM (таймаут, невалидный ответ) — выбрасываем исключение
 		const errorMessage = error instanceof Error ? error.message : String(error)
-		console.warn(`[generatePromptTags] Error during LLM call: ${errorMessage}, using fallback`)
-		return createFallbackResult(currentPrompt)
+		console.error(`[generatePromptTags] LLM call failed: ${errorMessage}`)
+		throw error
 	}
 }

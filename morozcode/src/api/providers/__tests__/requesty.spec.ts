@@ -58,7 +58,7 @@ describe("RequestyHandler", () => {
 			baseURL: "https://router.requesty.ai/v1",
 			apiKey: mockOptions.requestyApiKey,
 			defaultHeaders: {
-				"HTTP-Referer": "https://github.com/Zoo-Code-Org/Zoo-Code",
+				"HTTP-Referer": "https://github.com/morozcode-Org/morozcode",
 				"X-Title": "Zoo Code",
 				"User-Agent": `ZooCode/${Package.version}`,
 			},
@@ -73,7 +73,7 @@ describe("RequestyHandler", () => {
 			baseURL: "https://custom.requesty.ai/v1",
 			apiKey: mockOptions.requestyApiKey,
 			defaultHeaders: {
-				"HTTP-Referer": "https://github.com/Zoo-Code-Org/Zoo-Code",
+				"HTTP-Referer": "https://github.com/morozcode-Org/morozcode",
 				"X-Title": "Zoo Code",
 				"User-Agent": `ZooCode/${Package.version}`,
 			},
