@@ -127,6 +127,7 @@ import {
 } from "../task-persistence/promptTagger"
 import { waitForRefactoringDone } from "../task-persistence/refactoringLock"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
+import { PipelineLogger } from "../pipeline-logger"
 import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
 import {
 	type CheckpointDiffOptions,
@@ -328,6 +329,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	/** ��������� ���������� ����������� ������� (��� pre-filter � attemptApiRequest) */
 	private lastPromptTagsResult: GeneratePromptTagsResult | undefined
 
+	// Pipeline Logger
+	private pipelineLogger: PipelineLogger
+
 	// Ask
 	private askResponse?: ClineAskResponse
 	private askResponseText?: string
@@ -507,6 +511,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.modelRegistry = new ModelRegistry(5 * 60 * 1000, this.apiConfiguration?.artificialAnalysisApiKey)
 		this.dynamicModelSelector = new DynamicModelSelector()
 		this.autoApprovalHandler = new AutoApprovalHandler()
+
+		// Pipeline Logger — логи пишутся в рабочую директорию
+		const pipelineLogDir = "C:\\Users\\Евгений\\Desktop\\AIZaya\\morozcode-logs"
+		this.pipelineLogger = new PipelineLogger(this.taskId, pipelineLogDir)
 
 		this.consecutiveMistakeLimit = consecutiveMistakeLimit ?? DEFAULT_CONSECUTIVE_MISTAKE_LIMIT
 		this.providerRef = new WeakRef(provider)
@@ -2688,6 +2696,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					// Retry-loop: up to 2 attempts to get tags
 					const maxRetries = 2
 					let lastError: Error | undefined
+					let retryCount = 0
+
+					// Логирование шага 1 (waitForRefactoringDone) — вызывается внутри generatePromptTags
+					this.pipelineLogger.startStep()
 
 					for (let attempt = 1; attempt <= maxRetries; attempt++) {
 						try {
@@ -2699,16 +2711,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								this.taskId,
 								this.globalStoragePath,
 							)
+
+							// Логирование шага 1 после успешного завершения (waitForRefactoringDone внутри)
+							await this.pipelineLogger.logStep(1, "success", {
+								wasRefactoring: true,
+								waitDurationMs: 0,
+							})
 							console.log(
 								`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
 							)
 							lastError = undefined
+							retryCount = attempt - 1
 							break
 						} catch (error) {
 							lastError = error instanceof Error ? error : new Error(String(error))
 							console.warn(
 								`[Task#${this.taskId}] generatePromptTags attempt ${attempt}/${maxRetries} failed: ${lastError.message}`,
 							)
+							retryCount = attempt
 							if (attempt < maxRetries) {
 								await new Promise((resolve) => setTimeout(resolve, 1000))
 							}
@@ -2716,9 +2736,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 
 					if (lastError) {
+						await this.pipelineLogger.logStep(2, "error-fatal", {
+							source: "error",
+							tagsCount: 0,
+							retryCount,
+							error: lastError.message,
+						})
 						throw new Error(
 							`[Task#${this.taskId}] generatePromptTags failed after ${maxRetries} attempts: ${lastError.message}`,
 						)
+					}
+
+					// Логирование шага 2 (generatePromptTags)
+					if (this.lastPromptTagsResult) {
+						await this.pipelineLogger.logStep(2, this.lastPromptTagsResult.source === "llm" ? "success" : "fallback", {
+							source: this.lastPromptTagsResult.source,
+							tagsCount: this.lastPromptTagsResult.tags.direct.length,
+							retryCount,
+						})
 					}
 				}
 
@@ -2776,9 +2811,29 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 				}
 
+				// Логирование шага 3 (DynamicModelSelector)
+				if (this._dynamicModelSelectorActive && this.lastPromptTagsResult?.source === "llm") {
+					const currentModelId = this.api.getModel().id
+					const availableModels = await this.modelRegistry.getAvailableModels()
+					await this.pipelineLogger.logStep(3, "success", {
+						selectedModel: currentModelId,
+						reason: apiWasSwapped ? "model_swapped" : "kept_current",
+						candidatesCount: availableModels.length,
+					})
+				}
+
 				// Yields only if the first chunk is successful, otherwise will
 				// allow the user to retry the request (most likely due to rate
 				// limit error, which gets thrown on the first chunk).
+
+				// Логирование шага 5 (api.createMessage / attemptApiRequest)
+				this.pipelineLogger.startStep()
+				const currentModel = this.api.getModel()
+				await this.pipelineLogger.logStep(5, "success", {
+					model: currentModel.id,
+					modelInfo: currentModel.info,
+				})
+
 				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, { skipProviderRateLimit: true })
 				let assistantMessage = ""
 				let reasoningMessage = ""
@@ -3581,6 +3636,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	
 					// RAG Step 6: Рефакторинг и тегирование ответа модели
 					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
+					this.pipelineLogger.startStep()
+					let step6Status: "success" | "fallback" | "error" = "success"
+					let step6Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0 }
 					try {
 						const lastMessageIndex = this.apiConversationHistory.length - 1
 						if (lastMessageIndex >= 0) {
@@ -3595,14 +3653,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								{ model: "openrouter/owl-alpha" }, // Фиксированная модель для тегирования (будет заменена позже)
 							)
 							console.log(`[Task#${this.taskId}] refactorAndTagMessage completed for message ${lastMessageIndex}`)
+							// Определяем source и fragmentsCount из результата
+							if (lastMessage.content && Array.isArray(lastMessage.content)) {
+								step6Details.fragmentsCount = lastMessage.content.length
+							}
 						}
 					} catch (error) {
 						// Fallback: продолжаем без тегирования
+						step6Status = "fallback"
+						step6Details.source = "fallback"
+						step6Details.error = error instanceof Error ? error.message : String(error)
 						console.warn(
 							`[Task#${this.taskId}] refactorAndTagMessage failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
 						)
 					}
-	
+
+					// Логирование шага 6 (refactorAndTagMessage)
+					await this.pipelineLogger.logStep(6, step6Status, step6Details)
+
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
 				}
 
@@ -4266,6 +4334,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		} else {
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
+
+		// Логирование шага 4 (getEffectiveApiHistoryWithTags)
+		const totalHistory = this.apiConversationHistory.length
+		const filteredCount = effectiveHistory.length
+		await this.pipelineLogger.logStep(4, "success", {
+			messagesFiltered: totalHistory - filteredCount,
+			chunksFound: filteredCount,
+			usedTagFilter: !!(this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0),
+		})
+
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
 		// For API only: merge consecutive user messages (excludes summary messages per
 		// mergeConsecutiveApiMessages implementation) without mutating stored history.
