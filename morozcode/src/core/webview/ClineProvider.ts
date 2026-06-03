@@ -2961,6 +2961,12 @@ export class ClineProvider
 
 		// Clears task again, so we need to abortTask manually above.
 		await this.createTaskWithHistoryItem({ ...historyItem, rootTask, parentTask })
+
+		// Ensure webview receives the updated state after rehydration.
+		// Without this, the webview may display an empty/cleared UI because
+		// postStateToWebview was called during the abort window (between
+		// abortTask and rehydration) when the task was in a partial state.
+		await this.postStateToWebview()
 	}
 
 	// Clear the current task without treating it as a subtask.
