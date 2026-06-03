@@ -61,10 +61,11 @@ import { CloudService } from "@roo-code/cloud"
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
 import { ApiStream, GroundingSource } from "../../api/transform/stream"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
-import { ModelRegistry } from "../../api/model-selection"
+import { ModelRegistry, DynamicModelSelector, ModelOverloadError } from "../../api/model-selection"
 
 // shared
 import { findLastIndex } from "../../shared/array"
+import { EXPERIMENT_IDS, experiments as Experiments } from "../../shared/experiments"
 import { combineApiRequests } from "../../shared/combineApiRequests"
 import { combineCommandSequences } from "../../shared/combineCommandSequences"
 import { t } from "../../i18n"
@@ -295,6 +296,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	apiConfiguration: ProviderSettings
 	api: ApiHandler
 	modelRegistry: ModelRegistry
+	private dynamicModelSelector: DynamicModelSelector
+	private _dynamicModelSelectorActive: boolean = false
 	private static lastGlobalApiRequestTime?: number
 	private autoApprovalHandler: AutoApprovalHandler
 
@@ -502,6 +505,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.apiConfiguration = apiConfiguration
 		this.api = buildApiHandler(this.apiConfiguration)
 		this.modelRegistry = new ModelRegistry(5 * 60 * 1000, this.apiConfiguration?.artificialAnalysisApiKey)
+		this.dynamicModelSelector = new DynamicModelSelector()
 		this.autoApprovalHandler = new AutoApprovalHandler()
 
 		this.consecutiveMistakeLimit = consecutiveMistakeLimit ?? DEFAULT_CONSECUTIVE_MISTAKE_LIMIT
@@ -1449,7 +1453,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	public updateApiConfiguration(newApiConfiguration: ProviderSettings): void {
 		// Update the configuration and rebuild the API handler
 		this.apiConfiguration = newApiConfiguration
-		this.api = buildApiHandler(this.apiConfiguration)
+
+		// Check if "Dynamic Model Selection" profile is active (special modelId marker)
+		if (newApiConfiguration.apiModelId === "__dynamic__") {
+			// Store the original configuration for DynamicModelSelector to use
+			this._dynamicModelSelectorActive = true
+			// Use OpenRouter as the base provider for dynamic selection
+			this.api = buildApiHandler({
+				...newApiConfiguration,
+				apiProvider: "openrouter",
+				apiModelId: "openrouter/auto", // Default fallback, will be overridden by DynamicModelSelector
+			})
+		} else {
+			this._dynamicModelSelectorActive = false
+			this.api = buildApiHandler(this.apiConfiguration)
+		}
+
 		this.modelRegistry = new ModelRegistry(5 * 60 * 1000, this.apiConfiguration?.artificialAnalysisApiKey)
 	}
 
@@ -2688,6 +2707,60 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 				}
 
+				// Dynamic Model Selection: выбор оптимальной модели через OpenRouter на основе тегов
+				// Активируется когда выбран профиль "Dynamic Model Selection" в API Configuration
+				let originalApi: ApiHandler | undefined
+				let apiWasSwapped = false
+				if (this._dynamicModelSelectorActive && this.lastPromptTagsResult?.source === "llm") {
+					try {
+						const availableModels = await this.modelRegistry.getAvailableModels()
+						if (availableModels.length === 0) {
+							console.warn(
+								`[Task#${this.taskId}] Dynamic model selection: no available models, skipping`,
+							)
+						} else {
+							const config = this.modelRegistry.getDefaultConfig()
+							const refinedPrompt = this.lastPromptTagsResult.refinedPrompt || userTextContent
+							const contextMessages = this.apiConversationHistory
+								.filter((m) => typeof m.content === "string")
+								.map((m) => m.content as string)
+							const selectionResult = this.dynamicModelSelector.pickMostEfficient(
+								refinedPrompt,
+								availableModels,
+								config,
+								contextMessages,
+							)
+							const currentModelId = this.api.getModel().id
+							if (selectionResult.model.modelId !== currentModelId) {
+								originalApi = this.api
+								this.api = buildApiHandler({
+									...this.apiConfiguration,
+									apiProvider: "openrouter",
+									apiModelId: selectionResult.model.modelId,
+								})
+								apiWasSwapped = true
+								console.log(
+									`[Task#${this.taskId}] Dynamic model selection: ${currentModelId} → ${selectionResult.model.modelId} (${selectionResult.selectionReason})`,
+								)
+							} else {
+								console.log(
+									`[Task#${this.taskId}] Dynamic model selection: keeping current model ${currentModelId} (${selectionResult.selectionReason})`,
+								)
+							}
+						}
+					} catch (error) {
+						if (error instanceof ModelOverloadError) {
+							console.warn(
+								`[Task#${this.taskId}] Dynamic model selection overload: ${error.message}. Falling back to current model.`,
+							)
+						} else {
+							console.warn(
+								`[Task#${this.taskId}] Dynamic model selection failed: ${error instanceof Error ? error.message : String(error)}. Falling back to current model.`,
+							)
+						}
+					}
+				}
+
 				// Yields only if the first chunk is successful, otherwise will
 				// allow the user to retry the request (most likely due to rate
 				// limit error, which gets thrown on the first chunk).
@@ -3234,6 +3307,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					this.isStreaming = false
 					// Clean up the abort controller when streaming completes
 					this.currentRequestAbortController = undefined
+					// Restore original API handler after dynamic model selection
+					if (apiWasSwapped && originalApi) {
+						this.api = originalApi
+						console.log(`[Task#${this.taskId}] Restored original API handler after dynamic model selection`)
+					}
 				}
 
 				// Need to call here in case the stream was aborted.

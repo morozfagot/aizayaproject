@@ -362,12 +362,22 @@ export class ProviderSettingsManager {
 			return await this.lock(async () => {
 				const providerProfiles = await this.load()
 
-				return Object.entries(providerProfiles.apiConfigs).map(([name, apiConfig]) => ({
+				const configs = Object.entries(providerProfiles.apiConfigs).map(([name, apiConfig]) => ({
 					name,
 					id: apiConfig.id || "",
 					apiProvider: apiConfig.apiProvider,
 					modelId: this.cleanModelId(getModelId(apiConfig)),
 				}))
+
+				// Add hardcoded "Dynamic Model Selection" profile (not persisted, always present)
+				configs.push({
+					name: "Dynamic Model Selection",
+					id: "dynamic-model-selector",
+					apiProvider: "openrouter",
+					modelId: "__dynamic__",
+				})
+
+				return configs
 			})
 		} catch (error) {
 			throw new Error(`Failed to list configs: ${error}`)
