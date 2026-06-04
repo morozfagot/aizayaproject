@@ -785,31 +785,19 @@ export async function getEffectiveApiHistoryWithTags(
 			`[getEffectiveApiHistoryWithTags] Filtered ${baseHistory.length} → ${filteredMessages.length} messages (${relevantChunks.length} relevant chunks)`,
 		)
 
-		// Логирование шага 3 (обогащение промта)
-		await pipelineLogger?.logStep(3, "success", {
-			messagesBefore: baseHistory.length,
-			messagesAfter: filteredMessages.length,
-			messagesFiltered: baseHistory.length - filteredMessages.length,
-			chunksFound: relevantChunks.length,
-			tagFilterUsed: true,
-			promptTagsUsed: promptTags.direct,
-		})
+		// Вычисляем tagMatchDetails: для каждого тега промпта считаем сколько чанков совпало
+		const tagMatchDetails: Record<string, number> = {}
+		for (const tag of promptTags.direct) {
+			tagMatchDetails[tag] = relevantChunks.filter((chunk) => {
+				const entries = tagIndex.chunk_index[tag] ?? []
+				return entries.some((e) => e.chunk_id === chunk.chunk_id)
+			}).length
+		}
 
 		return filteredMessages
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
 		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning empty array`)
-
-		// Логирование ошибки шага 3
-		await pipelineLogger?.logStep(3, "error", {
-			messagesBefore: messages.length,
-			messagesAfter: 0,
-			messagesFiltered: 0,
-			chunksFound: 0,
-			tagFilterUsed: true,
-			promptTagsUsed: promptTags.direct,
-			error: errorMessage,
-		})
 
 		return []
 	}
