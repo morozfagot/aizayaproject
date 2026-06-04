@@ -2826,19 +2826,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// allow the user to retry the request (most likely due to rate
 				// limit error, which gets thrown on the first chunk).
 
-				// Логирование шага 5 (api.createMessage / attemptApiRequest)
-				this.pipelineLogger.startStep()
-				const currentModel = this.api.getModel()
-				await this.pipelineLogger.logStep(5, "success", {
-					model: currentModel.id,
-					modelInfo: currentModel.info,
-				})
-
 				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, { skipProviderRateLimit: true })
 				let assistantMessage = ""
 				let reasoningMessage = ""
 				let pendingGroundingSources: GroundingSource[] = []
 				this.isStreaming = true
+
+				let originalResponse = "" // Will be set after streaming completes
 
 				try {
 					const iterator = stream[Symbol.asyncIterator]()
@@ -3112,6 +3106,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							break
 						}
 					}
+
+					// Save original assistant response for step 5 logging (before refactoring)
+					originalResponse = assistantMessage.slice(0, 500)
 
 					// Create a copy of current token values to avoid race conditions
 					const currentTokens = {
@@ -3634,16 +3631,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					)
 					this.assistantMessageSavedToHistory = true
 	
-					// RAG Step 6: Рефакторинг и тегирование ответа модели
+					// RAG Step 5: Рефакторинг и тегирование ответа модели
 					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
 					this.pipelineLogger.startStep()
-					let step6Status: "success" | "fallback" | "error" = "success"
-					let step6Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0 }
+					let step5Status: "success" | "fallback" | "error" = "success"
+					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "openrouter/owl-alpha", chunkIds: [] as string[], originalResponse: "" }
 					try {
 						const lastMessageIndex = this.apiConversationHistory.length - 1
 						if (lastMessageIndex >= 0) {
 							const lastMessage = this.apiConversationHistory[lastMessageIndex]!
-							await refactorAndTagMessage(
+							const refactorResult = await refactorAndTagMessage(
 								lastMessage,
 								lastMessageIndex,
 								this.apiConversationHistory,
@@ -3653,23 +3650,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								{ model: "openrouter/owl-alpha" }, // Фиксированная модель для тегирования (будет заменена позже)
 							)
 							console.log(`[Task#${this.taskId}] refactorAndTagMessage completed for message ${lastMessageIndex}`)
-							// Определяем source и fragmentsCount из результата
-							if (lastMessage.content && Array.isArray(lastMessage.content)) {
-								step6Details.fragmentsCount = lastMessage.content.length
-							}
+							// Заполняем details из результата рефакторинга
+							step5Details.source = refactorResult.source
+							step5Details.fragmentsCount = refactorResult.fragments.length
+							step5Details.chunkIds = refactorResult.fragments.map((f) => f.chunk_id)
+							step5Details.originalResponse = originalResponse
 						}
 					} catch (error) {
 						// Fallback: продолжаем без тегирования
-						step6Status = "fallback"
-						step6Details.source = "fallback"
-						step6Details.error = error instanceof Error ? error.message : String(error)
+						step5Status = "fallback"
+						step5Details.source = "fallback"
+						step5Details.error = error instanceof Error ? error.message : String(error)
 						console.warn(
 							`[Task#${this.taskId}] refactorAndTagMessage failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
 						)
 					}
 
-					// Логирование шага 6 (refactorAndTagMessage)
-					await this.pipelineLogger.logStep(6, step6Status, step6Details)
+					// Логирование шага 5 (refactorAndTagMessage)
+					await this.pipelineLogger.logStep(5, step5Status, step5Details)
 
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
 				}
