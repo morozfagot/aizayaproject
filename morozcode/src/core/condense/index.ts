@@ -12,6 +12,7 @@ import { supportPrompt } from "../../shared/support-prompt"
 import { RooIgnoreController } from "../ignore/RooIgnoreController"
 import { generateFoldedFileContext } from "./foldedFileContext"
 import { findChunksByScore, readTagIndex } from "../task-persistence/tagIndex"
+import { PipelineLogger } from "../pipeline-logger"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
 
@@ -729,6 +730,7 @@ function extractTsFromChunkId(chunkId: string): number {
 	* @param taskId - ID задачи
 	* @param globalStoragePath - Путь к глобальному хранилищу
 	* @param threshold - Порог k для фильтрации score (default 0.5)
+	* @param pipelineLogger - Логгер RAG-пайплайна (опционально)
 	* @returns Отфильтрованная история сообщений
 	*/
 export async function getEffectiveApiHistoryWithTags(
@@ -737,6 +739,7 @@ export async function getEffectiveApiHistoryWithTags(
 	taskId: string,
 	globalStoragePath: string,
 	threshold: number = 0.5,
+	pipelineLogger?: PipelineLogger,
 ): Promise<ApiMessage[]> {
 	// Если тегов нет — возвращаем пустой массив (pre-filter не работает без тегов)
 	if (!promptTags.direct || promptTags.direct.length === 0) {
@@ -782,10 +785,32 @@ export async function getEffectiveApiHistoryWithTags(
 			`[getEffectiveApiHistoryWithTags] Filtered ${baseHistory.length} → ${filteredMessages.length} messages (${relevantChunks.length} relevant chunks)`,
 		)
 
+		// Логирование шага 3 (обогащение промта)
+		await pipelineLogger?.logStep(3, "success", {
+			messagesBefore: baseHistory.length,
+			messagesAfter: filteredMessages.length,
+			messagesFiltered: baseHistory.length - filteredMessages.length,
+			chunksFound: relevantChunks.length,
+			tagFilterUsed: true,
+			promptTagsUsed: promptTags.direct,
+		})
+
 		return filteredMessages
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
 		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning empty array`)
+
+		// Логирование ошибки шага 3
+		await pipelineLogger?.logStep(3, "error", {
+			messagesBefore: messages.length,
+			messagesAfter: 0,
+			messagesFiltered: 0,
+			chunksFound: 0,
+			tagFilterUsed: true,
+			promptTagsUsed: promptTags.direct,
+			error: errorMessage,
+		})
+
 		return []
 	}
 }

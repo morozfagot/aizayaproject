@@ -4313,11 +4313,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Hybrid Relevance Pipeline: ���� ���� ���� �� generatePromptTags(), ���������� getEffectiveApiHistoryWithTags()
 		let effectiveHistory: ApiMessage[]
 		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
+			this.pipelineLogger.startStep()
 			const tagFilteredHistory = await getEffectiveApiHistoryWithTags(
 				this.apiConversationHistory,
 				this.lastPromptTagsResult.tags,
 				this.taskId,
 				this.globalStoragePath,
+				0.5,
+				this.pipelineLogger,
 			)
 			// Fallback: tag-filter must not zero out context
 			if (tagFilteredHistory.length > 0) {
