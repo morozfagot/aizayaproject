@@ -2700,6 +2700,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 					// Логирование шага 1 (waitForRefactoringDone) — вызывается внутри generatePromptTags
 					this.pipelineLogger.startStep()
+					const step1Start = Date.now()
 
 					for (let attempt = 1; attempt <= maxRetries; attempt++) {
 						try {
@@ -2713,9 +2714,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							)
 
 							// Логирование шага 1 после успешного завершения (waitForRefactoringDone внутри)
+							const refactoringWaitMs = Date.now() - step1Start
 							await this.pipelineLogger.logStep(1, "success", {
 								wasRefactoring: true,
-								waitDurationMs: 0,
+								waitDurationMs: refactoringWaitMs,
+								refactoringWaitMs,
+								promptTags: this.lastPromptTagsResult.tags.direct,
 							})
 							console.log(
 								`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
@@ -2753,6 +2757,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							source: this.lastPromptTagsResult.source,
 							tagsCount: this.lastPromptTagsResult.tags.direct.length,
 							retryCount,
+							promptTags: this.lastPromptTagsResult.tags.direct,
+							tagWeights: this.lastPromptTagsResult.tags.weights,
 						})
 					}
 				}
@@ -2809,17 +2815,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							)
 						}
 					}
-				}
-
-				// Логирование шага 3 (DynamicModelSelector)
-				if (this._dynamicModelSelectorActive && this.lastPromptTagsResult?.source === "llm") {
-					const currentModelId = this.api.getModel().id
-					const availableModels = await this.modelRegistry.getAvailableModels()
-					await this.pipelineLogger.logStep(3, "success", {
-						selectedModel: currentModelId,
-						reason: apiWasSwapped ? "model_swapped" : "kept_current",
-						candidatesCount: availableModels.length,
-					})
 				}
 
 				// Yields only if the first chunk is successful, otherwise will
@@ -3654,6 +3649,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							step5Details.source = refactorResult.source
 							step5Details.fragmentsCount = refactorResult.fragments.length
 							step5Details.chunkIds = refactorResult.fragments.map((f) => f.chunk_id)
+							step5Details.fragmentSummaries = refactorResult.fragments.map((f) => f.summary)
 							step5Details.originalResponse = originalResponse
 						}
 					} catch (error) {
@@ -3668,6 +3664,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 					// Логирование шага 5 (refactorAndTagMessage)
 					await this.pipelineLogger.logStep(5, step5Status, step5Details)
+
+					// Логирование шага 6 (сохранение фрагментов)
+					this.pipelineLogger.startStep()
+					await this.pipelineLogger.logStep(6, step5Status, {
+						fragmentIds: step5Details.chunkIds ?? [],
+						fragmentSummaries: step5Details.fragmentSummaries ?? [],
+						fragmentsCount: step5Details.fragmentsCount ?? 0,
+					})
 
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
 				}
@@ -4310,6 +4314,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// enabling accurate rewind operations while still sending condensed history to the API.
 		// Hybrid Relevance Pipeline: ���� ���� ���� �� generatePromptTags(), ���������� getEffectiveApiHistoryWithTags()
 		let effectiveHistory: ApiMessage[]
+		let enrichedContext = false
+		let tagMatchDetails: Record<string, number> = {}
 		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
 			this.pipelineLogger.startStep()
 			const tagFilteredHistory = await getEffectiveApiHistoryWithTags(
@@ -4323,6 +4329,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// Fallback: tag-filter must not zero out context
 			if (tagFilteredHistory.length > 0) {
 				effectiveHistory = tagFilteredHistory
+				enrichedContext = true
+				// Вычисляем tagMatchDetails: для каждого тега считаем сколько сообщений из отфильтрованной истории содержат этот тег
+				for (const tag of this.lastPromptTagsResult.tags.direct) {
+					tagMatchDetails[tag] = tagFilteredHistory.filter((msg) => {
+						if (!msg.relevance_tags?.direct) return false
+						return msg.relevance_tags.direct.includes(tag)
+					}).length
+				}
 				console.log(
 					`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
 				)
@@ -4336,13 +4350,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
 
-		// Логирование шага 4 (getEffectiveApiHistoryWithTags)
+		// Логирование шага 3 (getEffectiveApiHistoryWithTags)
 		const totalHistory = this.apiConversationHistory.length
 		const filteredCount = effectiveHistory.length
-		await this.pipelineLogger.logStep(4, "success", {
+		await this.pipelineLogger.logStep(3, "success", {
 			messagesFiltered: totalHistory - filteredCount,
 			chunksFound: filteredCount,
 			usedTagFilter: !!(this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0),
+			enrichedContext,
+			tagMatchDetails,
 		})
 
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
@@ -4433,6 +4449,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
 			metadata,
 		)
+
+		// Логирование шага 4 (api.createMessage)
+		this.pipelineLogger.startStep()
+		await this.pipelineLogger.logStep(4, "success", {
+			enrichedContext,
+			tagMatchDetails,
+			messagesSent: cleanConversationHistory.length,
+			modelUsed: this.api.getModel().id,
+		})
+
 		const iterator = stream[Symbol.asyncIterator]()
 
 		// Set up abort handling - when the signal is aborted, clean up the controller reference
