@@ -27,20 +27,38 @@ export function getVisibleProviderOrLog(outputChannel: vscode.OutputChannel): Cl
 	return visibleProvider
 }
 
-// Store panel references in both modes
+/**
+ * Store panel references for both sidebar and tab modes.
+ * Both can coexist simultaneously.
+ */
 let sidebarPanel: vscode.WebviewView | undefined = undefined
 let tabPanel: vscode.WebviewPanel | undefined = undefined
 
 /**
- * Get the currently active panel
- * @returns WebviewPanel或WebviewView
+ * Get the sidebar panel (WebviewView)
+ */
+export function getSidebarPanel(): vscode.WebviewView | undefined {
+	return sidebarPanel
+}
+
+/**
+ * Get the tab panel (WebviewPanel)
+ */
+export function getTabPanel(): vscode.WebviewPanel | undefined {
+	return tabPanel
+}
+
+/**
+ * Get the currently active panel (tab takes priority if both visible)
+ * @returns WebviewPanel | WebviewView | undefined
  */
 export function getPanel(): vscode.WebviewPanel | vscode.WebviewView | undefined {
 	return tabPanel || sidebarPanel
 }
 
 /**
- * Set panel references
+ * Set panel references.
+ * NOTE: Does NOT clear the other panel — both can coexist.
  */
 export function setPanel(
 	newPanel: vscode.WebviewPanel | vscode.WebviewView | undefined,
@@ -48,10 +66,8 @@ export function setPanel(
 ): void {
 	if (type === "sidebar") {
 		sidebarPanel = newPanel as vscode.WebviewView
-		tabPanel = undefined
 	} else {
 		tabPanel = newPanel as vscode.WebviewPanel
-		sidebarPanel = undefined
 	}
 }
 
@@ -156,10 +172,11 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 	},
 	focusInput: async () => {
 		try {
-			await focusPanel(tabPanel, sidebarPanel)
+			await focusPanel(getTabPanel(), getSidebarPanel())
 
 			// Send focus input message only for sidebar panels
-			if (sidebarPanel && getPanel() === sidebarPanel) {
+			const sidebar = getSidebarPanel()
+			if (sidebar) {
 				await provider.postMessageToWebview({ type: "action", action: "focusInput" })
 			}
 		} catch (error) {
@@ -168,7 +185,7 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 	},
 	focusPanel: async () => {
 		try {
-			await focusPanel(tabPanel, sidebarPanel)
+			await focusPanel(getTabPanel(), getSidebarPanel())
 		} catch (error) {
 			outputChannel.appendLine(`Error focusing panel: ${error}`)
 		}

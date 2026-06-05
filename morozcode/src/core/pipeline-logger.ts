@@ -3,6 +3,8 @@ import * as path from "path"
 
 /**
  * Запись лога RAG-пайплайна.
+ * Расширенный формат для метасознания: включает полный текст запроса/ответа
+ * и метаданные модели для динамического анализа нейронкой.
  */
 export interface PipelineLogEntry {
 	timestamp: string
@@ -11,6 +13,18 @@ export interface PipelineLogEntry {
 	status: "success" | "fallback" | "error" | "error-fatal"
 	durationMs: number
 	details: Record<string, unknown>
+	/** Полный текст запроса (user prompt) для метасознания */
+	originalRequest?: string
+	/** Полный текст ответа (assistant response) для метасознания */
+	originalResponse?: string
+	/** Использованная модель */
+	modelUsed?: string
+	/** Количество токенов в запросе (если доступно) */
+	tokenCountPrompt?: number
+	/** Количество токенов в ответе (если доступно) */
+	tokenCountCompletion?: number
+	/** Стоимость запроса в USD (если доступна) */
+	costUsd?: number
 }
 
 /**
@@ -36,11 +50,23 @@ export class PipelineLogger {
 
 	/**
 	 * Записать лог шага.
+	 * @param step - Номер шага (1-6)
+	 * @param status - Статус выполнения
+	 * @param details - Детали шага (метаданные)
+	 * @param meta - Метаданные для метасознания (опционально)
 	 */
 	async logStep(
 		step: 1 | 2 | 3 | 4 | 5 | 6,
 		status: "success" | "fallback" | "error" | "error-fatal",
 		details: Record<string, unknown>,
+		meta?: {
+			originalRequest?: string
+			originalResponse?: string
+			modelUsed?: string
+			tokenCountPrompt?: number
+			tokenCountCompletion?: number
+			costUsd?: number
+		},
 	): Promise<void> {
 		const durationMs = Date.now() - this.currentStepStart
 		const entry: PipelineLogEntry = {
@@ -50,6 +76,12 @@ export class PipelineLogger {
 			status,
 			durationMs,
 			details,
+			originalRequest: meta?.originalRequest,
+			originalResponse: meta?.originalResponse,
+			modelUsed: meta?.modelUsed,
+			tokenCountPrompt: meta?.tokenCountPrompt,
+			tokenCountCompletion: meta?.tokenCountCompletion,
+			costUsd: meta?.costUsd,
 		}
 		await this.appendLog(entry)
 	}

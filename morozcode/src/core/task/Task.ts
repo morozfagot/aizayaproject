@@ -2693,8 +2693,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				if (userTextContent.trim().length > 0) {
 					const systemPrompt = await this.getSystemPrompt()
 
-					// Retry-loop: up to 2 attempts to get tags
-					const maxRetries = 2
+					// Single attempt: no retry loop — tagging failure falls back to auto-tags gracefully
+					const maxRetries = 1
 					let lastError: Error | undefined
 					let retryCount = 0
 
@@ -2720,6 +2720,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								waitDurationMs: refactoringWaitMs,
 								refactoringWaitMs,
 								promptTags: this.lastPromptTagsResult.tags.direct,
+							}, {
+								originalRequest: userTextContent.slice(0, 2000),
+								originalResponse: this.lastPromptTagsResult.refinedPrompt || this.lastPromptTagsResult.tags.direct.join(", "),
+								modelUsed: this.api.getModel().id,
 							})
 							console.log(
 								`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
@@ -2759,6 +2763,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							retryCount,
 							promptTags: this.lastPromptTagsResult.tags.direct,
 							tagWeights: this.lastPromptTagsResult.tags.weights,
+						}, {
+							originalRequest: userTextContent.slice(0, 2000),
+							originalResponse: this.lastPromptTagsResult.refinedPrompt || this.lastPromptTagsResult.tags.direct.join(", "),
+							modelUsed: this.api.getModel().id,
 						})
 					}
 				}
@@ -3628,9 +3636,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	
 					// RAG Step 5: Рефакторинг и тегирование ответа модели
 					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
+					// NOTE: модель для тегирования — передаётся через modelOverride в metadata (OpenRouter)
 					this.pipelineLogger.startStep()
 					let step5Status: "success" | "fallback" | "error" = "success"
-					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "openrouter/owl-alpha", chunkIds: [] as string[], originalResponse: "" }
+					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "deepseek/deepseek-v4-flash", chunkIds: [] as string[], originalResponse: "" }
 					try {
 						const lastMessageIndex = this.apiConversationHistory.length - 1
 						if (lastMessageIndex >= 0) {
@@ -3642,7 +3651,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								this.api,
 								this.taskId,
 								this.globalStoragePath,
-								{ model: "openrouter/owl-alpha" }, // Фиксированная модель для тегирования (будет заменена позже)
+								{ model: "deepseek/deepseek-v4-flash", timeoutMs: 45000 },
 							)
 							console.log(`[Task#${this.taskId}] refactorAndTagMessage completed for message ${lastMessageIndex}`)
 							// Заполняем details из результата рефакторинга
@@ -3663,14 +3672,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 
 					// Логирование шага 5 (refactorAndTagMessage)
-					await this.pipelineLogger.logStep(5, step5Status, step5Details)
-
+					await this.pipelineLogger.logStep(5, step5Status, step5Details, {
+						originalResponse: typeof step5Details.originalResponse === "string" ? step5Details.originalResponse : undefined,
+						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
+					})
+	
 					// Логирование шага 6 (сохранение фрагментов)
 					this.pipelineLogger.startStep()
 					await this.pipelineLogger.logStep(6, step5Status, {
 						fragmentIds: step5Details.chunkIds ?? [],
 						fragmentSummaries: step5Details.fragmentSummaries ?? [],
 						fragmentsCount: step5Details.fragmentsCount ?? 0,
+					}, {
+						originalResponse: typeof step5Details.originalResponse === "string" ? step5Details.originalResponse : undefined,
+						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
 					})
 
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
@@ -4359,6 +4374,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			usedTagFilter: !!(this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0),
 			enrichedContext,
 			tagMatchDetails,
+		}, {
+			originalRequest: `History: ${totalHistory} messages, tags: ${this.lastPromptTagsResult?.tags.direct.join(", ") || "none"}`,
+			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}`,
+			modelUsed: this.api.getModel().id,
 		})
 
 		const messagesSinceLastSummary = getMessagesSinceLastSummary(effectiveHistory)
@@ -4456,6 +4475,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			enrichedContext,
 			tagMatchDetails,
 			messagesSent: cleanConversationHistory.length,
+			modelUsed: this.api.getModel().id,
+		}, {
+			originalRequest: systemPrompt.slice(0, 1000),
+			originalResponse: `Messages sent: ${cleanConversationHistory.length}, enriched: ${enrichedContext}`,
 			modelUsed: this.api.getModel().id,
 		})
 

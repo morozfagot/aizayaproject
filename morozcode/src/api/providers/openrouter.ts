@@ -214,6 +214,8 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 		const model = await this.fetchModel()
 
 		let { id: modelId, maxTokens, temperature, topP, reasoning } = model
+		// Support model override per-request (used by tagging pipeline)
+		const effectiveModelId = metadata?.modelOverride ?? modelId
 
 		// Reset reasoning_details accumulator for this request
 		this.currentReasoningDetails = []
@@ -225,7 +227,7 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 		// Note: Gemini 3 models use reasoning_details format with thought signatures,
 		// but we handle this via skip_thought_signature_validator injection below.
 		if (
-			(modelId === "google/gemini-2.5-pro-preview" || modelId === "google/gemini-2.5-pro") &&
+			(effectiveModelId === "google/gemini-2.5-pro-preview" || effectiveModelId === "google/gemini-2.5-pro") &&
 			typeof reasoning === "undefined"
 		) {
 			reasoning = { exclude: true }
@@ -233,7 +235,7 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 
 		// Convert Anthropic messages to OpenAI format.
 		// Pass normalization function for Mistral compatibility (requires 9-char alphanumeric IDs)
-		const isMistral = modelId.toLowerCase().includes("mistral")
+		const isMistral = effectiveModelId.toLowerCase().includes("mistral")
 		let openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
 			{ role: "system", content: systemPrompt },
 			...convertToOpenAiMessages(
@@ -243,12 +245,12 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 		]
 
 		// DeepSeek highly recommends using user instead of system role.
-		if (modelId.startsWith("deepseek/deepseek-r1") || modelId === "perplexity/sonar-reasoning") {
+		if (effectiveModelId.startsWith("deepseek/deepseek-r1") || effectiveModelId === "perplexity/sonar-reasoning") {
 			openAiMessages = convertToR1Format([{ role: "user", content: systemPrompt }, ...messages])
 		}
 
 		// Process reasoning_details when switching models to Gemini.
-		const isGemini = modelId.startsWith("google/gemini")
+		const isGemini = effectiveModelId.startsWith("google/gemini")
 
 		// For Gemini models with native protocol:
 		// 1. Sanitize messages to handle thought signature validation issues.
@@ -264,7 +266,7 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 		// See: https://github.com/cline/cline/issues/8214
 		if (isGemini) {
 			// Step 1: Sanitize messages - filter out tool calls with missing/mismatched reasoning_details
-			openAiMessages = sanitizeGeminiMessages(openAiMessages, modelId)
+			openAiMessages = sanitizeGeminiMessages(openAiMessages, effectiveModelId)
 
 			// Step 2: Inject fake reasoning.encrypted block for tool calls that survived sanitization
 			openAiMessages = openAiMessages.map((msg) => {
@@ -300,8 +302,8 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 
 		// https://openrouter.ai/docs/features/prompt-caching
 		// TODO: Add a `promptCacheStratey` field to `ModelInfo`.
-		if (OPEN_ROUTER_PROMPT_CACHING_MODELS.has(modelId)) {
-			if (modelId.startsWith("google")) {
+		if (OPEN_ROUTER_PROMPT_CACHING_MODELS.has(effectiveModelId)) {
+			if (effectiveModelId.startsWith("google")) {
 				addGeminiCacheBreakpoints(systemPrompt, openAiMessages)
 			} else {
 				addAnthropicCacheBreakpoints(systemPrompt, openAiMessages)
@@ -310,7 +312,7 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 
 		// https://openrouter.ai/docs/transforms
 		const completionParams: OpenRouterChatCompletionParams = {
-			model: modelId,
+			model: effectiveModelId,
 			...(maxTokens && maxTokens > 0 && { max_tokens: maxTokens }),
 			temperature,
 			top_p: topP,

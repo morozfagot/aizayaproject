@@ -402,7 +402,10 @@ export async function refactorAndTagMessage(
 		)
 
 		const streamPromise = (async () => {
-			const stream = apiHandler.createMessage(systemPrompt, requestMessages, { taskId })
+			const stream = apiHandler.createMessage(systemPrompt, requestMessages, {
+				taskId,
+				...(options?.model ? { modelOverride: options.model } : {}),
+			})
 			for await (const chunk of stream) {
 				if (chunk.type === "text") {
 					llmResponse += chunk.text

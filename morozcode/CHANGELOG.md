@@ -1,5 +1,37 @@
 # Morozcode Changelog
 
+## 1.4.8
+
+### Bug Fixes
+
+- Fix dead code bug: `model` parameter in `RefactorAndTagOptions` was never passed to `apiHandler.createMessage()` — model override had zero effect (`[messageRefactorer.ts:405](../../commit/path)`)
+- Remove retry loop in prompt tagging step (single attempt, no retry) — tagging failure falls back to auto-tags gracefully (`[Task.ts:2697](../../commit/path)`)
+
+### Features
+
+- Add `modelOverride` field to `ApiHandlerCreateMessageMetadata` interface — enables per-request model override via metadata (`[api/index.ts:92](../../commit/path)`)
+- Implement `modelOverride` support in `OpenRouterHandler.createMessage()` — allows downstream tagging pipeline to specify model per-request (`[openrouter.ts:214](../../commit/path)`)
+- Add `model` option to `GeneratePromptTagsOptions` and pass through `modelOverride` metadata (`[promptTagger.ts:31](../../commit/path)`)
+- Pass model from `RefactorAndTagOptions` as `modelOverride` metadata in `refactorAndTagMessage()` (`[messageRefactorer.ts:408](../../commit/path)`)
+
+### Changes
+
+- Switch RAG tagging model from `openrouter/owl-alpha` (dead) to `deepseek/deepseek-v4-flash` via `modelOverride` mechanism (`[Task.ts:3643,3655](../../commit/path)`)
+- Increase tagging timeout from 20s to 45s (optimal for deepseek-v4-flash) (`[Task.ts:3655](../../commit/path)`)
+
+## 1.4.7
+
+### Bug Fixes
+
+- Replace dead `openrouter/owl-alpha` hardcoded model in RAG Step 5 with `nvidia/nemotron-3-ultra-550b-a55b:free` as a temporary workaround; the previous provider is no longer responding and was breaking the tagging pipeline (`[Task.ts:3641,3653](AiZayaProject/morozcode/src/core/task/Task.ts:3641)`)
+- Add explicit `timeoutMs: 20000` to `refactorAndTagMessage()` call so the tagging step fails fast with a visible error instead of hanging indefinitely when the provider is unresponsive
+
+## 1.4.6
+
+### Bug Fixes
+
+- Fix infinite request loop when both sidebar and tab panels are open: `setPanel()` no longer clears the other panel reference, allowing both sidebar and tab to coexist without interfering with each other's request/response flow
+
 ## 1.0.0
 
 ### Initial Release
@@ -12,6 +44,13 @@
 All notable changes to Morozcode will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Morozcode uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## 3.55.1
+
+### Features
+
+- Extend pipeline log format for metacognition: add `originalRequest`, `originalResponse`, `modelUsed`, `tokenCountPrompt`, `tokenCountCompletion`, `costUsd` fields to `PipelineLogEntry` interface and `logStep` method
+- Update all 7 `logStep` calls in Task.ts to pass metacognition metadata (full request/response text, model info) for dynamic neural network analysis and self-correction
 
 ## 3.55.0
 

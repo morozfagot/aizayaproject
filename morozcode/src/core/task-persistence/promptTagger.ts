@@ -28,6 +28,8 @@ export interface GeneratePromptTagsOptions {
 	timeoutMs?: number
 	/** Кастомный системный промпт для тегирования */
 	systemPrompt?: string
+	/** Модель для LLM-вызова (переопределяет модель, настроенную в провайдере) */
+	model?: string
 }
 
 // ─── Системный промпт ────────────────────────────────────────────────────────
@@ -197,7 +199,7 @@ function createFallbackResult(originalPrompt: string): GeneratePromptTagsResult 
  * Адаптер для оборачивания ApiHandler в SingleCompletionHandler.
  * Используется для единообразного интерфейса вызова LLM.
  */
-export function createPromptTaggerClient(apiHandler: ApiHandler): SingleCompletionHandler {
+export function createPromptTaggerClient(apiHandler: ApiHandler, taskId?: string, modelOverride?: string): SingleCompletionHandler {
 	return {
 		completePrompt: async (prompt: string): Promise<string> => {
 			const requestMessages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -205,7 +207,10 @@ export function createPromptTaggerClient(apiHandler: ApiHandler): SingleCompleti
 			]
 
 			let responseText = ""
-			const stream = apiHandler.createMessage(PROMPT_TAGGER_SYSTEM_PROMPT, requestMessages)
+			const metadata: Record<string, unknown> = {}
+			if (taskId) metadata.taskId = taskId
+			if (modelOverride) metadata.modelOverride = modelOverride
+			const stream = apiHandler.createMessage(PROMPT_TAGGER_SYSTEM_PROMPT, requestMessages, metadata as any)
 
 			for await (const chunk of stream) {
 				if (chunk.type === "text") {
@@ -270,7 +275,10 @@ export async function generatePromptTags(
 		let llmResponse = ""
 
 		const streamPromise = (async () => {
-			const stream = apiHandler.createMessage(systemPromptForTagger, requestMessages, { taskId })
+			const stream = apiHandler.createMessage(systemPromptForTagger, requestMessages, {
+				taskId,
+				...(options?.model ? { modelOverride: options.model } : {}),
+			})
 			for await (const chunk of stream) {
 				if (chunk.type === "text") {
 					llmResponse += chunk.text

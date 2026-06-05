@@ -89,6 +89,12 @@ export interface ApiHandlerCreateMessageMetadata {
 	 * Only applies to providers that support function calling restrictions (e.g., Gemini).
 	 */
 	allowedFunctionNames?: string[]
+	/**
+	 * Optional model override for this specific request.
+	 * When set, the provider will use this model ID instead of the configured one.
+	 * Supported by: OpenRouter, and any provider that implements model override.
+	 */
+	modelOverride?: string
 }
 
 export interface ApiHandler {
