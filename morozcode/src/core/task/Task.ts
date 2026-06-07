@@ -4317,18 +4317,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		let effectiveHistory: ApiMessage[]
 		let enrichedContext = false
 		let tagMatchDetails: Record<string, number> = {}
+		let rrrDiagnostics: { findChunksResult: string[]; extractedTsCount: number; reasonForEmpty?: string } | undefined
 		if (isQdrantConfigured()) {
 			this.pipelineLogger.startStep()
-			const vectorFilteredHistory = await getEffectiveApiHistoryWithVectorSearch(
+			const vectorSearchResult = await getEffectiveApiHistoryWithVectorSearch(
 				this.apiConversationHistory,
 				"",
 				this.taskId,
 				this.globalStoragePath,
 				4.0,
 			)
+			rrrDiagnostics = vectorSearchResult.diagnostics
 			// Fallback: vector-filter must not zero out context
-			if (vectorFilteredHistory.length > 0) {
-				effectiveHistory = vectorFilteredHistory
+			if (vectorSearchResult.messages.length > 0) {
+				effectiveHistory = vectorSearchResult.messages
 				enrichedContext = true
 				console.log(
 					`[Task#${this.taskId}] Using vector-filtered history: ${effectiveHistory.length} messages (RRR via Qdrant)`,
@@ -4352,8 +4354,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			chunksFound: filteredCount,
 			usedTagFilter: enrichedContext,
 			enrichedContext,
-			tagMatchDetails: {},
+			tagMatchDetails: rrrDiagnostics?.findChunksResult
+				? { chunkIdsCount: rrrDiagnostics.findChunksResult.length }
+				: {},
 			requestSummary,
+			findChunksResult: rrrDiagnostics?.findChunksResult ?? [],
+			extractedTsCount: rrrDiagnostics?.extractedTsCount ?? 0,
+			reasonForEmpty: rrrDiagnostics?.reasonForEmpty,
 		}, {
 			originalRequest: `History: ${totalHistory} messages, vector search enabled`,
 			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}`,
@@ -4497,8 +4504,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				messagesSent: cleanConversationHistory.length,
 				modelUsed: this.api.getModel().id,
 				messagesSummary,
+				fallbackUsed: !enrichedContext,
+				enrichedMessageCount: enrichedContext ? (rrrDiagnostics?.extractedTsCount ?? cleanConversationHistory.length) : 0,
+				totalMessageSize: JSON.stringify(cleanConversationHistory).length,
 			}, {
-				originalRequest: systemPrompt.slice(0, 1000),
+				originalRequest: systemPrompt,
 				originalResponse: `First chunk received. Messages: ${cleanConversationHistory.length}, enriched: ${enrichedContext}`,
 				modelUsed: this.api.getModel().id,
 			})
@@ -4520,8 +4530,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				error: errorMessage,
 				timeoutMs: isTimeout ? API_REQUEST_TIMEOUT_MS : undefined,
 				messagesSummary,
+				fallbackUsed: !enrichedContext,
+				enrichedMessageCount: enrichedContext ? (rrrDiagnostics?.extractedTsCount ?? cleanConversationHistory.length) : 0,
+				totalMessageSize: JSON.stringify(cleanConversationHistory).length,
 			}, {
-				originalRequest: systemPrompt.slice(0, 1000),
+				originalRequest: systemPrompt,
 				originalResponse: `API error: ${errorMessage}`,
 				modelUsed: this.api.getModel().id,
 			})

@@ -719,96 +719,145 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
  * @param taskId - ID задачи
  * @param globalStoragePath - Путь к глобальному хранилищу
  * @param threshold - Порог релевантности (default 0.0, маппится в score_threshold Qdrant)
- * @returns Отфильтрованная история сообщений или пустой массив при ошибке
+ * @returns Объект с отфильтрованной историей и диагностикой RRR
  */
 export async function getEffectiveApiHistoryWithVectorSearch(
-	messages: ApiMessage[],
-	queryText: string,
-	taskId: string,
-	globalStoragePath: string,
-	threshold: number = 0.0,
-): Promise<ApiMessage[]> {
-	try {
-		// GUARD: Проверяем, что Qdrant явно сконфигурирован (не дефолтный localhost)
-		if (!isQdrantConfigured()) {
-			console.warn("[getEffectiveApiHistoryWithVectorSearch] Qdrant не сконфигурирован (дефолтный localhost), RRR-цикл пропущен")
-			return []
-		}
+ messages: ApiMessage[],
+ queryText: string,
+ taskId: string,
+ globalStoragePath: string,
+ threshold: number = 0.0,
+): Promise<{
+ messages: ApiMessage[];
+ diagnostics: {
+ 	findChunksResult: string[];
+ 	extractedTsCount: number;
+ 	reasonForEmpty?: string;
+ };
+}> {
+ try {
+ 	// GUARD: Проверяем, что Qdrant явно сконфигурирован (не дефолтный localhost)
+ 	if (!isQdrantConfigured()) {
+ 		console.warn("[getEffectiveApiHistoryWithVectorSearch] Qdrant не сконфигурирован (дефолтный localhost), RRR-цикл пропущен")
+ 		return {
+ 			messages: [],
+ 			diagnostics: {
+ 				findChunksResult: [],
+ 				extractedTsCount: 0,
+ 				reasonForEmpty: "Qdrant не сконфигурирован (дефолтный localhost)",
+ 			},
+ 		}
+ 	}
 
-		// Проверяем что есть текст для поиска
-		if (!queryText || queryText.trim().length === 0) {
-			console.warn("[getEffectiveApiHistoryWithVectorSearch] Empty query text, skipping RRR")
-			return []
-		}
+ 	// Проверяем что есть текст для поиска
+ 	if (!queryText || queryText.trim().length === 0) {
+ 		console.warn("[getEffectiveApiHistoryWithVectorSearch] Empty query text, skipping RRR")
+ 		return {
+ 			messages: [],
+ 			diagnostics: {
+ 				findChunksResult: [],
+ 				extractedTsCount: 0,
+ 				reasonForEmpty: "Empty query text, skipping RRR",
+ 			},
+ 		}
+ 	}
 
-		// Получаем конфигурацию Qdrant
-		const qdrantConfig = getQdrantConfig()
-		const vectorSize = getVectorSize()
+ 	// Получаем конфигурацию Qdrant
+ 	const qdrantConfig = getQdrantConfig()
+ 	const vectorSize = getVectorSize()
 
-		// Получаем embedder (пытаемся через CodeIndexManager, фолбэк на прямой)
-		let embedFunction: ((text: string) => Promise<number[]>) | null = null
+ 	// Получаем embedder (пытаемся через CodeIndexManager, фолбэк на прямой)
+ 	let embedFunction: ((text: string) => Promise<number[]>) | null = null
 
-		// Пытаемся через VSCode ExtensionContext если доступен
-		try {
-			const { getEmbedderFromCodeIndex } = await import("./sessionQdrant")
-			// We can't easily get context here, so try direct approach first
-		} catch {
-			// ignore
-		}
+ 	// Пытаемся через VSCode ExtensionContext если доступен
+ 	try {
+ 		const { getEmbedderFromCodeIndex } = await import("./sessionQdrant")
+ 		// We can't easily get context here, so try direct approach first
+ 	} catch {
+ 		// ignore
+ 	}
 
-		// Через конфиг VS Code
-		try {
-			const config = require("vscode").workspace.getConfiguration("roo-code.codebaseIndex")
-			const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
-			if (apiKey) {
-				const embedderObj = createDirectEmbedder(apiKey)
-				embedFunction = embedderObj.embedFunction
-			}
-		} catch {
-			// VS Code API not available in this context
-		}
+ 	// Через конфиг VS Code
+ 	try {
+ 		const config = require("vscode").workspace.getConfiguration("roo-code.codebaseIndex")
+ 		const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
+ 		if (apiKey) {
+ 			const embedderObj = createDirectEmbedder(apiKey)
+ 			embedFunction = embedderObj.embedFunction
+ 		}
+ 	} catch {
+ 		// VS Code API not available in this context
+ 	}
 
-		if (!embedFunction) {
-			console.warn("[getEffectiveApiHistoryWithVectorSearch] No embedder available, skipping RRR")
-			return []
-		}
+ 	if (!embedFunction) {
+ 		console.warn("[getEffectiveApiHistoryWithVectorSearch] No embedder available, skipping RRR")
+ 		return {
+ 			messages: [],
+ 			diagnostics: {
+ 				findChunksResult: [],
+ 				extractedTsCount: 0,
+ 				reasonForEmpty: "No embedder available, skipping RRR",
+ 			},
+ 		}
+ 	}
 
-		// Создаём/получаем сессионную коллекцию
-		const workspacePath = globalStoragePath || qdrantConfig.url
-		const { client, collectionName } = await ensureSessionCollection(
-			workspacePath,
-			qdrantConfig.url,
-			vectorSize,
-			qdrantConfig.apiKey,
-		)
+ 	// Создаём/получаем сессионную коллекцию
+ 	const workspacePath = globalStoragePath || qdrantConfig.url
+ 	const { client, collectionName } = await ensureSessionCollection(
+ 		workspacePath,
+ 		qdrantConfig.url,
+ 		vectorSize,
+ 		qdrantConfig.apiKey,
+ 	)
 
-		// Запускаем RRR цикл
-		const foundMessageTs = await rrrSearch(
-			embedFunction,
-			client,
-			collectionName,
-			queryText,
-			taskId,
-			3, // maxIterations
-			3, // fragmentsPerIteration
-			threshold, // scoreThreshold
-		)
+ 	// Запускаем RRR цикл
+ 	const rrrResult = await rrrSearch(
+ 		embedFunction,
+ 		client,
+ 		collectionName,
+ 		queryText,
+ 		taskId,
+ 		3, // maxIterations
+ 		3, // fragmentsPerIteration
+ 		threshold, // scoreThreshold
+ 	)
+ 	const { messageTsSet, chunkIds } = rrrResult
 
-		if (foundMessageTs.size === 0) {
-			console.log("[getEffectiveApiHistoryWithVectorSearch] RRR found no relevant fragments, returning empty")
-			return []
-		}
+ 	if (messageTsSet.size === 0) {
+ 		console.log("[getEffectiveApiHistoryWithVectorSearch] RRR found no relevant fragments, returning empty")
+ 		return {
+ 			messages: [],
+ 			diagnostics: {
+ 				findChunksResult: [],
+ 				extractedTsCount: 0,
+ 				reasonForEmpty: "RRR found no relevant fragments",
+ 			},
+ 		}
+ 	}
 
-		// Фильтруем сообщения по найденным messageTs
-		const filtered = messages.filter((msg) => msg.ts != null && foundMessageTs.has(String(msg.ts)))
-		console.log(
-			`[getEffectiveApiHistoryWithVectorSearch] RRR found ${foundMessageTs.size} relevant messages, filtered ${filtered.length}/${messages.length}`,
-		)
-		return filtered
-	} catch (error) {
-		console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
-		return [] // Fallback: пустой массив — Task.ts проверит length > 0 и переключится на standard history
-	}
+ 	// Фильтруем сообщения по найденным messageTs
+ 	const filtered = messages.filter((msg) => msg.ts != null && messageTsSet.has(String(msg.ts)))
+ 	console.log(
+ 		`[getEffectiveApiHistoryWithVectorSearch] RRR found ${messageTsSet.size} relevant messages, filtered ${filtered.length}/${messages.length}`,
+ 	)
+ 	return {
+ 		messages: filtered,
+ 		diagnostics: {
+ 			findChunksResult: chunkIds,
+ 			extractedTsCount: messageTsSet.size,
+ 		},
+ 	}
+ } catch (error) {
+ 	console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
+ 	return {
+ 		messages: [],
+ 		diagnostics: {
+ 			findChunksResult: [],
+ 			extractedTsCount: 0,
+ 			reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
+ 		},
+ 	}
+ }
 }
 
 export { isQdrantConfigured }

@@ -173,7 +173,7 @@ export async function searchSimilarMessages(
  * @param maxIterations - Maximum RRR iterations (default: 3)
  * @param fragmentsPerIteration - Fragments to retrieve per iteration (default: 3)
  * @param scoreThreshold - Minimum score threshold (default: 0.0)
- * @returns Set of unique messageTs found
+ * @returns Object with messageTsSet (Set of unique messageTs) and chunkIds (array of unique chunk IDs)
  */
 export async function rrrSearch(
 	embedFunction: (text: string) => Promise<number[]>,
@@ -184,8 +184,10 @@ export async function rrrSearch(
 	maxIterations: number = 3,
 	fragmentsPerIteration: number = 3,
 	scoreThreshold: number = 0.0,
-): Promise<Set<string>> {
+): Promise<{ messageTsSet: Set<string>; chunkIds: string[] }> {
 	const messageTsSet = new Set<string>()
+	const chunkIds: string[] = []
+	const seenChunkIds = new Set<string>()
 	let currentVector = await embedFunction(queryText)
 	const seenIds = new Set<string>()
 
@@ -209,6 +211,12 @@ export async function rrrSearch(
 				if (messageTs) messageTsSet.add(messageTs)
 			}
 
+			// Collect unique chunk IDs for diagnostics
+			if (chunkId && !seenChunkIds.has(chunkId)) {
+				seenChunkIds.add(chunkId)
+				chunkIds.push(chunkId)
+			}
+
 			// Try to embed the fragment text to refine the query vector
 			if (payload.text && typeof payload.text === "string") {
 				try {
@@ -226,7 +234,7 @@ export async function rrrSearch(
 		currentVector = averageVectors(newVectors)
 	}
 
-	return messageTsSet
+	return { messageTsSet, chunkIds }
 }
 
 /**
@@ -340,4 +348,33 @@ export function getVectorSize(): number {
 	} catch {
 		return 1024 // fallback default
 	}
+}
+
+/**
+	* Извлекает messageTs из chunk_id произвольного формата.
+	*
+	* Поддерживаемые форматы:
+	* - `msg-{messageTs}-frag-{index}` — стандартный формат из messageRefactorer
+	* - Любой другой формат — возвращает null (chunk_id может быть произвольной строкой)
+	*
+	* @param chunkId - Идентификатор чанка (chunk_id из payload Qdrant)
+	* @returns Извлечённый messageTs (строка) или null, если формат не распознан
+	*
+	* @example
+	* extractTsFromChunkId("msg-1704067200000-frag-0") // "1704067200000"
+	* extractTsFromChunkId("msg-abc123-frag-2")         // "abc123"
+	* extractTsFromChunkId("custom-chunk-id")           // null
+	*/
+export function extractTsFromChunkId(chunkId: string): string | null {
+	if (!chunkId || typeof chunkId !== "string") return null
+
+	// Формат: msg-{messageTs}-frag-{index}
+	const msgPattern = /^msg-(.+)-frag-\d+$/
+	const match = chunkId.match(msgPattern)
+	if (match && match[1]) {
+		return match[1]
+	}
+
+	// Если формат не распознан — chunk_id произвольный, ts не извлекается
+	return null
 }
