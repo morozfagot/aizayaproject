@@ -10,38 +10,15 @@ export { readTaskMessages, saveTaskMessages } from "./taskMessages"
 export { taskMetadata } from "./taskMetadata"
 export { TaskHistoryStore } from "./TaskHistoryStore"
 export {
-	type TagIndex,
-	type ChunkIndexEntry,
-	createEmptyTagIndex,
-	addTagToIndex,
-	removeTagFromIndex,
-	lookupTags,
-	addChunkToIndex,
-	removeChunkFromIndex,
-	lookupChunksByTag,
-	findChunksByAllTags,
-	findChunksByScore,
-	buildTagIndex,
-	readTagIndex,
-	persistTagIndex,
-} from "./tagIndex"
-export {
-	refactorAndTagMessage,
+	chunkMessage,
 	extractMessageText,
 	extractRelevantContext,
 	buildRefactoringPrompt,
 	parseLLMResponse,
 	convertToMessageFragment,
 	aggregateFragmentTags,
-	saveMessagesWithIndex,
-	type RefactoredFragment,
-	type RefactorAndTagResult,
-	type RefactorAndTagOptions,
+	type ChunkFragment,
+	type ChunkResult,
+	type ChunkOptions,
 } from "./messageRefactorer"
-export {
-	generatePromptTags,
-	createPromptTaggerClient,
-	type GeneratePromptTagsResult,
-	type GeneratePromptTagsOptions,
-} from "./promptTagger"
 export { waitForRefactoringDone } from "./refactoringLock"

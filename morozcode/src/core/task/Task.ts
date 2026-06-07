@@ -117,15 +117,9 @@ import {
 	readTaskMessages,
 	saveTaskMessages,
 	taskMetadata,
-	refactorAndTagMessage,
+	chunkMessage,
+	type ChunkResult,
 } from "../task-persistence"
-import {
-	generatePromptTags,
-	createPromptTaggerClient,
-	type GeneratePromptTagsResult,
-	type GeneratePromptTagsOptions,
-} from "../task-persistence/promptTagger"
-import { waitForRefactoringDone } from "../task-persistence/refactoringLock"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
 import { PipelineLogger } from "../pipeline-logger"
 import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
@@ -138,7 +132,7 @@ import {
 	checkpointDiff,
 } from "../checkpoints"
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
-import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithTags } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithVectorSearch, isQdrantConfigured } from "../condense"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 import { AutoApprovalHandler, checkAutoApproval } from "../auto-approval"
 import { MessageManager } from "../message-manager"
@@ -150,7 +144,7 @@ const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
 const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
-
+const API_REQUEST_TIMEOUT_MS = 120_000 // 120 seconds timeout for API createMessage (step 4)
 export interface TaskOptions extends CreateTaskOptions {
 	provider: ClineProvider
 	apiConfiguration: ProviderSettings
@@ -326,8 +320,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	clineMessages: ClineMessage[] = []
 
 	// Hybrid Relevance Pipeline
-	/** ��������� ���������� ����������� ������� (��� pre-filter � attemptApiRequest) */
-	private lastPromptTagsResult: GeneratePromptTagsResult | undefined
 
 	// Pipeline Logger
 	private pipelineLogger: PipelineLogger
@@ -2691,91 +2683,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					.join("\n")
 
 				if (userTextContent.trim().length > 0) {
-					const systemPrompt = await this.getSystemPrompt()
-
-					// Single attempt: no retry loop — tagging failure falls back to auto-tags gracefully
-					const maxRetries = 1
-					let lastError: Error | undefined
-					let retryCount = 0
-
-					// Логирование шага 1 (waitForRefactoringDone) — вызывается внутри generatePromptTags
-					this.pipelineLogger.startStep()
-					const step1Start = Date.now()
-
-					for (let attempt = 1; attempt <= maxRetries; attempt++) {
-						try {
-							this.lastPromptTagsResult = await generatePromptTags(
-								systemPrompt,
-								this.apiConversationHistory,
-								userTextContent,
-								this.api,
-								this.taskId,
-								this.globalStoragePath,
-							)
-
-							// Логирование шага 1 после успешного завершения (waitForRefactoringDone внутри)
-							const refactoringWaitMs = Date.now() - step1Start
-							await this.pipelineLogger.logStep(1, "success", {
-								wasRefactoring: true,
-								waitDurationMs: refactoringWaitMs,
-								refactoringWaitMs,
-								promptTags: this.lastPromptTagsResult.tags.direct,
-							}, {
-								originalRequest: userTextContent.slice(0, 2000),
-								originalResponse: this.lastPromptTagsResult.refinedPrompt || this.lastPromptTagsResult.tags.direct.join(", "),
-								modelUsed: this.api.getModel().id,
-							})
-							console.log(
-								`[Task#${this.taskId}] Prompt tags generated: source=${this.lastPromptTagsResult.source}, tags=${this.lastPromptTagsResult.tags.direct.length}`,
-							)
-							lastError = undefined
-							retryCount = attempt - 1
-							break
-						} catch (error) {
-							lastError = error instanceof Error ? error : new Error(String(error))
-							console.warn(
-								`[Task#${this.taskId}] generatePromptTags attempt ${attempt}/${maxRetries} failed: ${lastError.message}`,
-							)
-							retryCount = attempt
-							if (attempt < maxRetries) {
-								await new Promise((resolve) => setTimeout(resolve, 1000))
-							}
-						}
-					}
-
-					if (lastError) {
-						await this.pipelineLogger.logStep(2, "error-fatal", {
-							source: "error",
-							tagsCount: 0,
-							retryCount,
-							error: lastError.message,
-						})
-						throw new Error(
-							`[Task#${this.taskId}] generatePromptTags failed after ${maxRetries} attempts: ${lastError.message}`,
-						)
-					}
-
-					// Логирование шага 2 (generatePromptTags)
-					if (this.lastPromptTagsResult) {
-						await this.pipelineLogger.logStep(2, this.lastPromptTagsResult.source === "llm" ? "success" : "fallback", {
-							source: this.lastPromptTagsResult.source,
-							tagsCount: this.lastPromptTagsResult.tags.direct.length,
-							retryCount,
-							promptTags: this.lastPromptTagsResult.tags.direct,
-							tagWeights: this.lastPromptTagsResult.tags.weights,
-						}, {
-							originalRequest: userTextContent.slice(0, 2000),
-							originalResponse: this.lastPromptTagsResult.refinedPrompt || this.lastPromptTagsResult.tags.direct.join(", "),
-							modelUsed: this.api.getModel().id,
-						})
-					}
+					// RRR-предиктор: векторный поиск через Qdrant (заменяет generatePromptTags)
+					// Промпт пользователя напрямую идёт в Qdrant для поиска похожих фрагментов
+					console.log(
+						`[Task#${this.taskId}] RRR vector search: prompt length=${userTextContent.length}`,
+					)
 				}
 
-				// Dynamic Model Selection: выбор оптимальной модели через OpenRouter на основе тегов
+				// Dynamic Model Selection: выбор оптимальной модели через OpenRouter
 				// Активируется когда выбран профиль "Dynamic Model Selection" в API Configuration
 				let originalApi: ApiHandler | undefined
 				let apiWasSwapped = false
-				if (this._dynamicModelSelectorActive && this.lastPromptTagsResult?.source === "llm") {
+				if (this._dynamicModelSelectorActive) {
 					try {
 						const availableModels = await this.modelRegistry.getAvailableModels()
 						if (availableModels.length === 0) {
@@ -2784,7 +2703,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							)
 						} else {
 							const config = this.modelRegistry.getDefaultConfig()
-							const refinedPrompt = this.lastPromptTagsResult.refinedPrompt || userTextContent
+							const refinedPrompt = userTextContent
 							const contextMessages = this.apiConversationHistory
 								.filter((m) => typeof m.content === "string")
 								.map((m) => m.content as string)
@@ -3634,31 +3553,30 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					)
 					this.assistantMessageSavedToHistory = true
 	
-					// RAG Step 5: Рефакторинг и тегирование ответа модели
+					// RAG Step 5: Разбиение ответа модели на фрагменты
 					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
 					// NOTE: модель для тегирования — передаётся через modelOverride в metadata (OpenRouter)
 					this.pipelineLogger.startStep()
 					let step5Status: "success" | "fallback" | "error" = "success"
-					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "deepseek/deepseek-v4-flash", chunkIds: [] as string[], originalResponse: "" }
+					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "nvidia/nemotron-3-ultra-550b-a55b:free", chunkIds: [] as string[], originalResponse: "" }
+					let chunkResult: ChunkResult | undefined = undefined
 					try {
 						const lastMessageIndex = this.apiConversationHistory.length - 1
 						if (lastMessageIndex >= 0) {
 							const lastMessage = this.apiConversationHistory[lastMessageIndex]!
-							const refactorResult = await refactorAndTagMessage(
+							chunkResult = await chunkMessage(
 								lastMessage,
 								lastMessageIndex,
 								this.apiConversationHistory,
-								this.api,
 								this.taskId,
 								this.globalStoragePath,
-								{ model: "deepseek/deepseek-v4-flash", timeoutMs: 45000 },
 							)
-							console.log(`[Task#${this.taskId}] refactorAndTagMessage completed for message ${lastMessageIndex}`)
-							// Заполняем details из результата рефакторинга
-							step5Details.source = refactorResult.source
-							step5Details.fragmentsCount = refactorResult.fragments.length
-							step5Details.chunkIds = refactorResult.fragments.map((f) => f.chunk_id)
-							step5Details.fragmentSummaries = refactorResult.fragments.map((f) => f.summary)
+							console.log(`[Task#${this.taskId}] chunkMessage completed for message ${lastMessageIndex}`)
+							// Заполняем details из результата разбиения
+							step5Details.source = chunkResult.source
+							step5Details.fragmentsCount = chunkResult.fragments.length
+							step5Details.chunkIds = chunkResult.fragments.map((f) => f.chunk_id)
+							step5Details.fragmentSummaries = chunkResult.fragments.map((f) => f.summary)
 							step5Details.originalResponse = originalResponse
 						}
 					} catch (error) {
@@ -3667,11 +3585,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						step5Details.source = "fallback"
 						step5Details.error = error instanceof Error ? error.message : String(error)
 						console.warn(
-							`[Task#${this.taskId}] refactorAndTagMessage failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
+							`[Task#${this.taskId}] chunkMessage failed, continuing without tags: ${error instanceof Error ? error.message : String(error)}`,
 						)
 					}
 
-					// Логирование шага 5 (refactorAndTagMessage)
+					// Логирование шага 5 (chunkMessage)
 					await this.pipelineLogger.logStep(5, step5Status, step5Details, {
 						originalResponse: typeof step5Details.originalResponse === "string" ? step5Details.originalResponse : undefined,
 						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
@@ -3687,6 +3605,74 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						originalResponse: typeof step5Details.originalResponse === "string" ? step5Details.originalResponse : undefined,
 						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
 					})
+
+					// Qdrant-индексация фрагментов (Шаг 6.5)
+					// Сохраняем фрагменты в векторную БД для RRR цикла
+					if (step5Status === "success" && typeof chunkResult !== "undefined" && chunkResult.fragments.length > 0) {
+						try {
+							const lastMessageTs = this.apiConversationHistory[this.apiConversationHistory.length - 1]?.ts
+							if (lastMessageTs) {
+								const { ensureSessionCollection, getQdrantConfig, getVectorSize, createDirectEmbedder } = await import("../condense/sessionQdrant")
+								const qdrantCfg = getQdrantConfig()
+								const vSize = getVectorSize()
+								const { client, collectionName } = await ensureSessionCollection(
+									this.globalStoragePath,
+									qdrantCfg.url,
+									vSize,
+									qdrantCfg.apiKey,
+								)
+
+								// Получаем embedder из конфига
+								const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+								const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
+								if (apiKey) {
+									const { embedFunction } = createDirectEmbedder(apiKey)
+									const texts = chunkResult.fragments.map((f) => f.summary || f.text)
+
+									// Embed all fragment texts
+									const embeddings: number[][] = []
+									for (const text of texts) {
+										try {
+											const vec = await embedFunction(text)
+											embeddings.push(vec)
+										} catch {
+											embeddings.push([])
+										}
+									}
+
+									// Upsert each fragment
+									if (embeddings.length > 0) {
+										const points = chunkResult.fragments.map((f, idx) => ({
+											id: `${this.taskId}_${f.chunk_id}_${lastMessageTs}`,
+											vector: embeddings[idx] || [],
+											payload: {
+												type: "session_history",
+												taskId: this.taskId,
+												messageTs: String(lastMessageTs),
+												chunkId: f.chunk_id,
+												text: f.summary || f.text,
+											},
+										})).filter((p) => p.vector.length > 0)
+
+										if (points.length > 0) {
+											await client.upsert(collectionName, {
+												points: points.map((p) => ({
+													id: p.id,
+													vector: p.vector,
+													payload: p.payload,
+												})),
+												wait: true,
+											})
+											console.log(`[Task#${this.taskId}] Indexed ${points.length} fragments to Qdrant session collection`)
+										}
+									}
+								}
+							}
+						} catch (qdrantError) {
+							// Non-fatal: индексация не должна прерывать основной поток
+							console.warn(`[Task#${this.taskId}] Qdrant indexing skipped (non-fatal):`, qdrantError instanceof Error ? qdrantError.message : String(qdrantError))
+						}
+					}
 
 					TelemetryService.instance.captureConversationMessage(this.taskId, "assistant")
 				}
@@ -4327,37 +4313,29 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Get the effective API history by filtering out condensed messages
 		// This allows non-destructive condensing where messages are tagged but not deleted,
 		// enabling accurate rewind operations while still sending condensed history to the API.
-		// Hybrid Relevance Pipeline: ���� ���� ���� �� generatePromptTags(), ���������� getEffectiveApiHistoryWithTags()
+		// RRR-цикл: векторный поиск через Qdrant напрямую по тексту промпта
 		let effectiveHistory: ApiMessage[]
 		let enrichedContext = false
 		let tagMatchDetails: Record<string, number> = {}
-		if (this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0) {
+		if (isQdrantConfigured()) {
 			this.pipelineLogger.startStep()
-			const tagFilteredHistory = await getEffectiveApiHistoryWithTags(
+			const vectorFilteredHistory = await getEffectiveApiHistoryWithVectorSearch(
 				this.apiConversationHistory,
-				this.lastPromptTagsResult.tags,
+				"",
 				this.taskId,
 				this.globalStoragePath,
-				0.5,
-				this.pipelineLogger,
+				4.0,
 			)
-			// Fallback: tag-filter must not zero out context
-			if (tagFilteredHistory.length > 0) {
-				effectiveHistory = tagFilteredHistory
+			// Fallback: vector-filter must not zero out context
+			if (vectorFilteredHistory.length > 0) {
+				effectiveHistory = vectorFilteredHistory
 				enrichedContext = true
-				// Вычисляем tagMatchDetails: для каждого тега считаем сколько сообщений из отфильтрованной истории содержат этот тег
-				for (const tag of this.lastPromptTagsResult.tags.direct) {
-					tagMatchDetails[tag] = tagFilteredHistory.filter((msg) => {
-						if (!msg.relevance_tags?.direct) return false
-						return msg.relevance_tags.direct.includes(tag)
-					}).length
-				}
 				console.log(
-					`[Task#${this.taskId}] Using tag-filtered history: ${effectiveHistory.length} messages (tags: ${this.lastPromptTagsResult.tags.direct.join(", ")})`,
+					`[Task#${this.taskId}] Using vector-filtered history: ${effectiveHistory.length} messages (RRR via Qdrant)`,
 				)
 			} else {
 				console.warn(
-					`[Task#${this.taskId}] Tag-filtered history is empty, falling back to standard history`,
+					`[Task#${this.taskId}] Vector-filtered history is empty, falling back to standard history`,
 				)
 				effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 			}
@@ -4365,17 +4343,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
 
-		// Логирование шага 3 (getEffectiveApiHistoryWithTags)
+		// Логирование шага 3 (getEffectiveApiHistoryWithVectorSearch)
 		const totalHistory = this.apiConversationHistory.length
 		const filteredCount = effectiveHistory.length
+		const requestSummary = `История: ${totalHistory} сообщений, отфильтровано: ${totalHistory - filteredCount}, осталось: ${filteredCount}, обогащение контекста: ${enrichedContext}`
 		await this.pipelineLogger.logStep(3, "success", {
 			messagesFiltered: totalHistory - filteredCount,
 			chunksFound: filteredCount,
-			usedTagFilter: !!(this.lastPromptTagsResult && this.lastPromptTagsResult.source === "llm" && this.lastPromptTagsResult.tags.direct.length > 0),
+			usedTagFilter: enrichedContext,
 			enrichedContext,
-			tagMatchDetails,
+			tagMatchDetails: {},
+			requestSummary,
 		}, {
-			originalRequest: `History: ${totalHistory} messages, tags: ${this.lastPromptTagsResult?.tags.direct.join(", ") || "none"}`,
+			originalRequest: `History: ${totalHistory} messages, vector search enabled`,
 			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}`,
 			modelUsed: this.api.getModel().id,
 		})
@@ -4462,25 +4442,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
+		// Начинаем замер времени для шага 4 (api.createMessage) ДО вызова API
+		this.pipelineLogger.startStep()
+
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		const stream = this.api.createMessage(
 			systemPrompt,
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
 			metadata,
 		)
-
-		// Логирование шага 4 (api.createMessage)
-		this.pipelineLogger.startStep()
-		await this.pipelineLogger.logStep(4, "success", {
-			enrichedContext,
-			tagMatchDetails,
-			messagesSent: cleanConversationHistory.length,
-			modelUsed: this.api.getModel().id,
-		}, {
-			originalRequest: systemPrompt.slice(0, 1000),
-			originalResponse: `Messages sent: ${cleanConversationHistory.length}, enriched: ${enrichedContext}`,
-			modelUsed: this.api.getModel().id,
-		})
 
 		const iterator = stream[Symbol.asyncIterator]()
 
@@ -4494,7 +4464,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// Awaiting first chunk to see if it will throw an error.
 			this.isWaitingForFirstChunk = true
 
-			// Race between the first chunk and the abort signal
+			// Race between the first chunk, the abort signal, and the timeout
 			const firstChunkPromise = iterator.next()
 			const abortPromise = new Promise<never>((_, reject) => {
 				if (abortSignal.aborted) {
@@ -4505,12 +4475,58 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					})
 				}
 			})
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				setTimeout(() => {
+					reject(new Error(`API request timed out after ${API_REQUEST_TIMEOUT_MS}ms`))
+				}, API_REQUEST_TIMEOUT_MS)
+			})
 
-			const firstChunk = await Promise.race([firstChunkPromise, abortPromise])
+			const firstChunk = await Promise.race([firstChunkPromise, abortPromise, timeoutPromise])
 			yield firstChunk.value
 			this.isWaitingForFirstChunk = false
+
+			// Формируем сводку по ролям отправленных сообщений
+			const userCount = cleanConversationHistory.filter((m: any) => m.role === "user").length
+			const assistantCount = cleanConversationHistory.filter((m: any) => m.role === "assistant").length
+			const messagesSummary = `Всего: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, обогащение: ${enrichedContext}`
+
+			// Логирование шага 4 (api.createMessage) — реальный замер времени ожидания первого чанка
+			await this.pipelineLogger.logStep(4, "success", {
+				enrichedContext,
+				tagMatchDetails,
+				messagesSent: cleanConversationHistory.length,
+				modelUsed: this.api.getModel().id,
+				messagesSummary,
+			}, {
+				originalRequest: systemPrompt.slice(0, 1000),
+				originalResponse: `First chunk received. Messages: ${cleanConversationHistory.length}, enriched: ${enrichedContext}`,
+				modelUsed: this.api.getModel().id,
+			})
 		} catch (error) {
 			this.isWaitingForFirstChunk = false
+			this.currentRequestAbortController = undefined
+
+			// Логирование шага 4 с ошибкой (таймаут или другая ошибка первого чанка)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			const isTimeout = errorMessage.includes("timed out")
+			const userCount = cleanConversationHistory.filter((m: any) => m.role === "user").length
+			const assistantCount = cleanConversationHistory.filter((m: any) => m.role === "assistant").length
+			const messagesSummary = `Всего: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, обогащение: ${enrichedContext}`
+			await this.pipelineLogger.logStep(4, isTimeout ? "error" : "error-fatal", {
+				enrichedContext,
+				tagMatchDetails,
+				messagesSent: cleanConversationHistory.length,
+				modelUsed: this.api.getModel().id,
+				error: errorMessage,
+				timeoutMs: isTimeout ? API_REQUEST_TIMEOUT_MS : undefined,
+				messagesSummary,
+			}, {
+				originalRequest: systemPrompt.slice(0, 1000),
+				originalResponse: `API error: ${errorMessage}`,
+				modelUsed: this.api.getModel().id,
+			})
+
+			// Clear abort controller before retry to avoid stale signals
 			this.currentRequestAbortController = undefined
 			const isContextWindowExceededError = checkContextWindowExceededError(error)
 

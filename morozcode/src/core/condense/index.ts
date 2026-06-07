@@ -11,8 +11,15 @@ import { findLast } from "../../shared/array"
 import { supportPrompt } from "../../shared/support-prompt"
 import { RooIgnoreController } from "../ignore/RooIgnoreController"
 import { generateFoldedFileContext } from "./foldedFileContext"
-import { findChunksByScore, readTagIndex } from "../task-persistence/tagIndex"
-import { PipelineLogger } from "../pipeline-logger"
+import {
+	getQdrantConfig,
+	getVectorSize,
+	ensureSessionCollection,
+	getEmbedderFromCodeIndex,
+	rrrSearch,
+	createDirectEmbedder,
+	isQdrantConfigured,
+} from "./sessionQdrant"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
 
@@ -703,102 +710,105 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
 }
 
 /**
-	* Извлекает timestamp сообщения из chunk_id.
-	* Формат chunk_id: "msg-{ts}-frag-{n}"
-	* Возвращает 0 если формат не распознан.
-	*/
-function extractTsFromChunkId(chunkId: string): number {
-	const match = chunkId.match(/^msg-(\d+)-frag-\d+$/)
-	return match ? parseInt(match[1], 10) : 0
-}
-
-/**
-	* Получает эффективную историю API с фильтрацией по тегам релевантности.
-	*
-	* Использует findChunksByScore() для pre-filter по тегам промпта.
-	* В отличие от getEffectiveApiHistory(), добавляет фильтрацию по релевантности:
-	* 1. Читает TagIndex из файла
-	* 2. Вызывает findChunksByScore() для получения релевантных chunk_id
-	* 3. Извлекает ts сообщений из chunk_id
-	* 4. Фильтрует сообщения: оставляет только те, чьи ts есть в релевантных
-	*
-	* Fallback: если pre-filter вернул пусто или произошла ошибка — возвращает пустой массив
-	* (НЕ полный контекст, НЕ summary).
-	*
-	* @param messages - Полная история API-сообщений
-	* @param promptTags - Теги релевантности промпта
-	* @param taskId - ID задачи
-	* @param globalStoragePath - Путь к глобальному хранилищу
-	* @param threshold - Порог k для фильтрации score (default 0.5)
-	* @param pipelineLogger - Логгер RAG-пайплайна (опционально)
-	* @returns Отфильтрованная история сообщений
-	*/
-export async function getEffectiveApiHistoryWithTags(
+ * Выполняет RRR (Retrieve-Refine-Retrieve) цикл векторного поиска
+ * для обогащения контекста релевантными фрагментами сессионной истории.
+ * Использует текст промпта напрямую для векторного сходства (без тегов).
+ *
+ * @param messages - Полная история API-сообщений
+ * @param queryText - Текст промпта пользователя для векторного поиска
+ * @param taskId - ID задачи
+ * @param globalStoragePath - Путь к глобальному хранилищу
+ * @param threshold - Порог релевантности (default 0.0, маппится в score_threshold Qdrant)
+ * @returns Отфильтрованная история сообщений или пустой массив при ошибке
+ */
+export async function getEffectiveApiHistoryWithVectorSearch(
 	messages: ApiMessage[],
-	promptTags: RelevanceTags,
+	queryText: string,
 	taskId: string,
 	globalStoragePath: string,
-	threshold: number = 0.5,
-	pipelineLogger?: PipelineLogger,
+	threshold: number = 0.0,
 ): Promise<ApiMessage[]> {
-	// Если тегов нет — возвращаем пустой массив (pre-filter не работает без тегов)
-	if (!promptTags.direct || promptTags.direct.length === 0) {
-		console.warn("[getEffectiveApiHistoryWithTags] No prompt tags provided, returning empty array")
-		return []
-	}
-
 	try {
-		// Шаг 1: Читаем TagIndex
-		const tagIndex = await readTagIndex({ taskId, globalStoragePath })
-
-		// Шаг 2: Находим релевантные фрагменты по score
-		const relevantChunks = findChunksByScore(tagIndex, promptTags, threshold)
-
-		// Шаг 3: Если релевантных чанков нет — возвращаем пустой массив
-		if (relevantChunks.length === 0) {
-			console.warn("[getEffectiveApiHistoryWithTags] No relevant chunks found, returning empty array")
+		// GUARD: Проверяем, что Qdrant явно сконфигурирован (не дефолтный localhost)
+		if (!isQdrantConfigured()) {
+			console.warn("[getEffectiveApiHistoryWithVectorSearch] Qdrant не сконфигурирован (дефолтный localhost), RRR-цикл пропущен")
 			return []
 		}
 
-		// Шаг 4: Извлекаем ts сообщений из chunk_id
-		const relevantTsSet = new Set<number>()
-		for (const chunk of relevantChunks) {
-			const ts = extractTsFromChunkId(chunk.chunk_id)
-			if (ts > 0) {
-				relevantTsSet.add(ts)
-			}
+		// Проверяем что есть текст для поиска
+		if (!queryText || queryText.trim().length === 0) {
+			console.warn("[getEffectiveApiHistoryWithVectorSearch] Empty query text, skipping RRR")
+			return []
 		}
 
-		// Шаг 5: Фильтруем сообщения по ts
-		// Также применяем стандартную фильтрацию condense/truncation
-		const baseHistory = getEffectiveApiHistory(messages)
-		const filteredMessages = baseHistory.filter((msg) => {
-			// Сообщения без ts (системные) — пропускаем
-			if (!msg.ts) {
-				return true
-			}
-			// Оставляем только сообщения с релевантными ts
-			return relevantTsSet.has(msg.ts)
-		})
+		// Получаем конфигурацию Qdrant
+		const qdrantConfig = getQdrantConfig()
+		const vectorSize = getVectorSize()
 
-		console.log(
-			`[getEffectiveApiHistoryWithTags] Filtered ${baseHistory.length} → ${filteredMessages.length} messages (${relevantChunks.length} relevant chunks)`,
+		// Получаем embedder (пытаемся через CodeIndexManager, фолбэк на прямой)
+		let embedFunction: ((text: string) => Promise<number[]>) | null = null
+
+		// Пытаемся через VSCode ExtensionContext если доступен
+		try {
+			const { getEmbedderFromCodeIndex } = await import("./sessionQdrant")
+			// We can't easily get context here, so try direct approach first
+		} catch {
+			// ignore
+		}
+
+		// Через конфиг VS Code
+		try {
+			const config = require("vscode").workspace.getConfiguration("roo-code.codebaseIndex")
+			const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
+			if (apiKey) {
+				const embedderObj = createDirectEmbedder(apiKey)
+				embedFunction = embedderObj.embedFunction
+			}
+		} catch {
+			// VS Code API not available in this context
+		}
+
+		if (!embedFunction) {
+			console.warn("[getEffectiveApiHistoryWithVectorSearch] No embedder available, skipping RRR")
+			return []
+		}
+
+		// Создаём/получаем сессионную коллекцию
+		const workspacePath = globalStoragePath || qdrantConfig.url
+		const { client, collectionName } = await ensureSessionCollection(
+			workspacePath,
+			qdrantConfig.url,
+			vectorSize,
+			qdrantConfig.apiKey,
 		)
 
-		// Вычисляем tagMatchDetails: для каждого тега промпта считаем сколько чанков совпало
-		const tagMatchDetails: Record<string, number> = {}
-		for (const tag of promptTags.direct) {
-			tagMatchDetails[tag] = relevantChunks.filter((chunk) => {
-				const entries = tagIndex.chunk_index[tag] ?? []
-				return entries.some((e) => e.chunk_id === chunk.chunk_id)
-			}).length
+		// Запускаем RRR цикл
+		const foundMessageTs = await rrrSearch(
+			embedFunction,
+			client,
+			collectionName,
+			queryText,
+			taskId,
+			3, // maxIterations
+			3, // fragmentsPerIteration
+			threshold, // scoreThreshold
+		)
+
+		if (foundMessageTs.size === 0) {
+			console.log("[getEffectiveApiHistoryWithVectorSearch] RRR found no relevant fragments, returning empty")
+			return []
 		}
 
-		return filteredMessages
+		// Фильтруем сообщения по найденным messageTs
+		const filtered = messages.filter((msg) => msg.ts != null && foundMessageTs.has(String(msg.ts)))
+		console.log(
+			`[getEffectiveApiHistoryWithVectorSearch] RRR found ${foundMessageTs.size} relevant messages, filtered ${filtered.length}/${messages.length}`,
+		)
+		return filtered
 	} catch (error) {
-		const errorMessage = error instanceof Error ? error.message : String(error)
-		console.error(`[getEffectiveApiHistoryWithTags] Error: ${errorMessage}, returning empty array`)
-
-		return []
+		console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
+		return [] // Fallback: пустой массив — Task.ts проверит length > 0 и переключится на standard history
 	}
 }
+
+export { isQdrantConfigured }

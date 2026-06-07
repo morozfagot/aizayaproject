@@ -43,7 +43,7 @@ export type RelevanceTags = {
 	weights: Record<string, number>
 
 	/** Источник тегирования */
-	source: "llm" | "auto" | "fallback"
+	source: "llm" | "auto" | "fallback" | "static"
 
 	/** Версия схемы тегов (для миграций) */
 	schema_version: 1

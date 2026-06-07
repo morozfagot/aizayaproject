@@ -27,7 +27,7 @@ vi.mock("../../../utils/storage", () => ({
 	}),
 }))
 
-import { refactorAndTagMessage } from "../messageRefactorer"
+import { chunkMessage } from "../messageRefactorer"
 
 function createMockApiHandler(responseText: string): ApiHandler {
 	return {
@@ -50,7 +50,7 @@ function makeApiMessage(role: "user" | "assistant", content: string, ts?: number
 	}
 }
 
-describe("refactorAndTagMessage", () => {
+describe("chunkMessage", () => {
 	let tmpDir: string
 	let taskId: string
 
@@ -71,7 +71,7 @@ describe("refactorAndTagMessage", () => {
 			message,
 		]
 
-		const result = await refactorAndTagMessage(
+		const result = await chunkMessage(
 			message,
 			1,
 			allMessages,
@@ -109,7 +109,7 @@ describe("refactorAndTagMessage", () => {
 			message,
 		]
 
-		const result = await refactorAndTagMessage(
+		const result = await chunkMessage(
 			message,
 			1,
 			allMessages,
@@ -153,7 +153,7 @@ describe("refactorAndTagMessage", () => {
 			message,
 		]
 
-		await refactorAndTagMessage(
+		await chunkMessage(
 			message,
 			1,
 			allMessages,
@@ -201,7 +201,7 @@ describe("refactorAndTagMessage", () => {
 			message,
 		]
 
-		await refactorAndTagMessage(
+		await chunkMessage(
 			message,
 			1,
 			allMessages,

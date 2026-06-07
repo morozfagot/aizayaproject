@@ -6,6 +6,5 @@ export const GlobalFileNames = {
 	taskMetadata: "task_metadata.json",
 	historyItem: "history_item.json",
 	historyIndex: "_index.json",
-	sessionTagIndex: "session_tag_index.json",
 	refactoringLock: "refactoring_lock.json",
 }

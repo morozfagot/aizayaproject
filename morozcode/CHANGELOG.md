@@ -1,5 +1,42 @@
 # Morozcode Changelog
 
+## 1.6.0
+
+### Features
+
+- **Replace refactoring model with free alternative**: `generatePromptTags()` and `refactorAndTagMessage()` now use `nvidia/nemotron-3-ultra-550b-a55b:free` instead of `deepseek/deepseek-v4-flash` — reduces API costs while maintaining tag quality (`[Task.ts:2707,3644,3656](AiZayaProject/morozcode/src/core/task/Task.ts:2707)`)
+
+## 1.5.1
+
+### Bug Fixes
+
+- **Move full message text into `details` for metacognition analysis**: `originalRequest`/`originalResponse` now duplicates into `details` in `PipelineLogger.logStep()` — model-analyzer reads `details`, not root level (`[pipeline-logger.ts:71-78](AiZayaProject/morozcode/src/core/pipeline-logger.ts:71)`)
+- **Add `originalPrompt` to step 1/2 details**: full user prompt text (`userTextContent`) now stored in `details.originalPrompt` for steps 1 and 2 (generatePromptTags) (`[Task.ts:2722,2764](AiZayaProject/morozcode/src/core/task/Task.ts:2722)`)
+- **Add `requestSummary` to step 3 details**: summary of request with message counts, tag filter status, and context enrichment flag (`[Task.ts:4375-4380](AiZayaProject/morozcode/src/core/task/Task.ts:4375)`)
+- **Add `messagesSummary` to step 4 details**: per-role message breakdown (user/assistant counts) for `api.createMessage()` — both success and error branches (`[Task.ts:4515-4525,4534-4544](AiZayaProject/morozcode/src/core/task/Task.ts:4515)`)
+- **Verify `originalResponse` in step 5 details**: confirmed `originalResponse` already present in `step5Details` object (`[Task.ts:3664](AiZayaProject/morozcode/src/core/task/Task.ts:3664)`)
+- **Verify fragments in step 6 details**: `fragmentIds`, `fragmentSummaries`, `fragmentsCount` confirmed in details (`[Task.ts:3684-3688](AiZayaProject/morozcode/src/core/task/Task.ts:3684)`)
+
+## 1.5.0
+
+### Features
+
+- **Replace relevance scoring formula**: `findChunksByScore()` now uses addition (`weight_prompt + weight_fragment`) instead of multiplication (`weight_prompt × weight_fragment`) — eliminates excessive discreteness, gives proportional similarity (2 strong tag matches ≈ 7 weak ones) (`[tagIndex.ts:280-282](AiZayaProject/morozcode/src/core/task-persistence/tagIndex.ts:280)`)
+- **Raise threshold from 0.5 to 4.0**: calibrated for the new additive formula — requires ~4 default tag matches or ~3 strong ones to pass the relevance filter (`[tagIndex.ts:258](AiZayaProject/morozcode/src/core/task-persistence/tagIndex.ts:258)`)
+- **Sync threshold across all call sites**: `getEffectiveApiHistoryWithTags()` (condense/index.ts), `truncateConversationByRelevance()` (context-management/index.ts), `Task.ts` — all use the new 4.0 default (`[condense/index.ts:741](AiZayaProject/morozcode/src/core/condense/index.ts:741)`)
+
+## 1.4.9
+
+### Bug Fixes
+
+- Add 120s timeout to `api.createMessage()` (step 4) — prevents infinite hang when OpenRouter provider is unresponsive; `Promise.race` with `timeoutPromise` in first-chunk wait loop (`[Task.ts:4507-4511](AiZayaProject/morozcode/src/core/task/Task.ts:4507)`)
+- Fix pipeline logging for step 4: `startStep()` now runs BEFORE `api.createMessage()`, `logStep(4)` runs AFTER first chunk or error — `durationMs` now reflects real API wait time instead of ~0ms (`[Task.ts:4465,4519-4534](AiZayaProject/morozcode/src/core/task/Task.ts:4465)`)
+- Add `timeoutMs` field to step 4 error log entries — makes timeout diagnosis visible in pipeline logs (`[Task.ts:4546](AiZayaProject/morozcode/src/core/task/Task.ts:4546)`)
+
+### Features
+
+- No new features in this release.
+
 ## 1.4.8
 
 ### Bug Fixes

@@ -69,13 +69,20 @@ export class PipelineLogger {
 		},
 	): Promise<void> {
 		const durationMs = Date.now() - this.currentStepStart
+		// Дублируем originalRequest/originalResponse в details для метасознания
+		// (модель-анализатор читает details, а не корневой уровень)
+		const detailsWithText: Record<string, unknown> = {
+			...details,
+			...(meta?.originalRequest !== undefined ? { originalRequest: meta.originalRequest } : {}),
+			...(meta?.originalResponse !== undefined ? { originalResponse: meta.originalResponse } : {}),
+		}
 		const entry: PipelineLogEntry = {
 			timestamp: new Date().toISOString(),
 			taskId: this.taskId,
 			step,
 			status,
 			durationMs,
-			details,
+			details: detailsWithText,
 			originalRequest: meta?.originalRequest,
 			originalResponse: meta?.originalResponse,
 			modelUsed: meta?.modelUsed,

@@ -1,17 +1,12 @@
 import { ApiMessage, MessageFragment, RelevanceTags, saveApiMessages } from "./apiMessages"
 import { setRefactoringFlag, clearRefactoringFlag } from "./refactoringLock"
-import { TagIndex, addChunkToIndex, persistTagIndex, readTagIndex } from "./tagIndex"
-import { generateAutoTags, validateTags } from "./relevanceTags"
-import type { ApiHandler } from "../../api"
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 
 /**
- * Фрагмент сообщения с тегами релевантности (для chunk-level RAG).
- * Расширение MessageFragment из apiMessages.ts с обязательными полями
- * для результата рефакторинга.
+ * Фрагмент сообщения для chunk-level RAG.
  */
-export interface RefactoredFragment {
+export interface ChunkFragment {
 	chunk_id: string
 	text: string
 	summary: string
@@ -20,67 +15,28 @@ export interface RefactoredFragment {
 }
 
 /**
- * Результат рефакторинга и тегирования сообщения.
+ * Результат разбиения сообщения на фрагменты (статическое разбиение, без LLM).
  */
-export interface RefactorAndTagResult {
-	/** Фрагменты с тегами */
-	fragments: RefactoredFragment[]
-	/** Агрегированные теги на уровне сообщения */
+export interface ChunkResult {
+	/** Фрагменты */
+	fragments: ChunkFragment[]
+	/** Агрегированные (пустые) теги на уровне сообщения */
 	tags: RelevanceTags
-	/** Источник тегирования */
-	source: "llm" | "fallback"
-	/** Стоимость операции (USD) */
+	/** Источник разбиения */
+	source: "static" | "fallback"
+	/** Стоимость операции (всегда 0 для статического разбиения) */
 	cost: number
 	/** Ошибка, если произошла */
 	error?: string
 }
 
 /**
- * Опции для refactorAndTagMessage.
+ * Опции для chunkMessage (статическое разбиение).
  */
-export interface RefactorAndTagOptions {
-	/** Модель для LLM-вызова (опционально, по умолчанию используется модель из apiHandler) */
-	model?: string
+export interface ChunkOptions {
 	/** Максимальное количество фрагментов */
 	maxFragments?: number
-	/** Таймаут в миллисекундах */
-	timeoutMs?: number
-	/** Системный промпт (опционально, по умолчанию используется REFACTOR_SYSTEM_PROMPT) */
-	systemPrompt?: string
 }
-
-// ─── Системный промпт ────────────────────────────────────────────────────────
-
-const REFACTOR_SYSTEM_PROMPT = `You are a message refactoring and tagging assistant. Your task is to:
-
-1. DECOMPOSE the assistant message into logical fragments (chunks)
-2. SUMMARIZE each fragment concisely (1-2 sentences)
-3. TAG each fragment with relevance tags
-
-Output format (JSON only, no markdown):
-{
-  "fragments": [
-    {
-      "chunk_id": "unique-id",
-      "text": "fragment text",
-      "summary": "brief summary",
-      "tags": {
-        "direct": ["tag1", "tag2"],
-        "depends_on": [],
-        "depended_by": [],
-        "weights": {"tag1": 0.9, "tag2": 0.7}
-      }
-    }
-  ]
-}
-
-Rules:
-- Each fragment should be a self-contained unit of meaning
-- Maximum 10 direct tags per fragment
-- Weights must be between 0.0 and 1.0
-- Use lowercase tags with colons for categories (e.g., "tool:read_file", "file:path/to/file")
-- If the message is short and coherent, return a single fragment
-- Preserve code blocks within fragments`
 
 // ─── Вспомогательные функции ─────────────────────────────────────────────────
 
@@ -151,6 +107,7 @@ export function extractRelevantContext(messages: ApiMessage[], contextWindow: nu
 
 /**
  * Формирует промпт для LLM из текста сообщения и контекста.
+ * @deprecated LLM-тегирование удалено. Функция сохранена для обратной совместимости.
  */
 export function buildRefactoringPrompt(
 	messageText: string,
@@ -173,6 +130,7 @@ Please decompose this message into at most ${maxFragments} logical fragments, su
 /**
  * Парсит ответ LLM в массив фрагментов.
  * Возвращает null если парсинг не удался.
+ * @deprecated LLM-тегирование удалено. Функция сохранена для обратной совместимости.
  */
 export function parseLLMResponse(responseText: string): Array<{
 	chunk_id: string
@@ -206,7 +164,8 @@ export function parseLLMResponse(responseText: string): Array<{
 }
 
 /**
- * Конвертирует сырой фрагмент из ответа LLM в RefactoredFragment.
+ * Конвертирует сырой фрагмент из ответа LLM в ChunkFragment.
+ * @deprecated LLM-тегирование удалено. Функция сохранена для обратной совместимости.
  */
 export function convertToMessageFragment(
 	raw: {
@@ -222,7 +181,7 @@ export function convertToMessageFragment(
 	},
 	messageTs: number,
 	fragmentIndex: number,
-): RefactoredFragment {
+): ChunkFragment {
 	const chunkId = raw.chunk_id || `msg-${messageTs}-frag-${fragmentIndex}`
 
 	return {
@@ -249,7 +208,7 @@ export function convertToMessageFragment(
  * Агрегирует теги фрагментов на уровне сообщения.
  * Объединяет direct теги всех фрагментов, берёт максимальные веса.
  */
-export function aggregateFragmentTags(fragments: RefactoredFragment[]): RelevanceTags {
+export function aggregateFragmentTags(fragments: ChunkFragment[]): RelevanceTags {
 	const allDirect: string[] = []
 	const allDependsOn: string[] = []
 	const allDependedBy: string[] = []
@@ -316,167 +275,116 @@ export function aggregateFragmentTags(fragments: RefactoredFragment[]): Relevanc
 	}
 }
 
-/**
- * Атомарно сохраняет сообщения и обновляет тег-индекс.
- * Гарантия: либо оба сохранения проходят, либо выбрасывается ошибка.
- */
-export async function saveMessagesWithIndex(
-	messages: ApiMessage[],
-	tagIndex: TagIndex,
-	taskId: string,
-	globalStoragePath: string,
-): Promise<void> {
-	// Атомарное сохранение: сначала сообщения, потом индекс
-	// Если saveApiMessages упадёт — индекс не обновится (консистентность)
-	await saveApiMessages({ messages, taskId, globalStoragePath })
-	await persistTagIndex({ index: tagIndex, taskId, globalStoragePath })
-}
-
 // ─── Основная функция ────────────────────────────────────────────────────────
 
 /**
- * Рефакторинг и тегирование сообщения — единый async LLM-поток.
+ * Статическое разбиение сообщения на фрагменты по абзацам (без LLM, без тегов).
  *
  * Алгоритм:
  * 1. setRefactoringFlag()
- * 2. Извлечь текст сообщения и контекст
- * 3. Вызвать LLM для декомпозиции + суммаризации + тегирования
- * 4. Валидировать фрагменты (validateTags), пофрагментный fallback
- * 5. Агрегировать теги на уровне сообщения
- * 6. Сохранить атомарно (saveApiMessages + persistTagIndex)
- * 7. finally { clearRefactoringFlag() }
+ * 2. Извлечь текст сообщения
+ * 3. Разбить по `\n\n` на абзацы
+ * 4. Создать фрагменты с chunk_id = `msg-{ts}-frag-{n}`, без тегов
+ * 5. Сохранить сообщение с фрагментами через saveApiMessages()
+ * 6. finally { clearRefactoringFlag() }
  *
- * @param message - Сообщение для рефакторинга (обычно assistant)
+ * @param message - Сообщение для разбиения (обычно assistant)
  * @param messageIndex - Индекс сообщения в массиве истории
- * @param allMessages - Полная история сообщений (для контекста)
- * @param apiHandler - API handler для LLM-вызова
+ * @param allMessages - Полная история сообщений
  * @param taskId - ID задачи
  * @param globalStoragePath - Путь к глобальному хранилищу
- * @param options - Опции рефакторинга
- * @returns Результат рефакторинга с фрагментами и тегами
+ * @param options - Опции (только maxFragments)
+ * @returns Результат с фрагментами и пустыми тегами
  */
-export async function refactorAndTagMessage(
+export async function chunkMessage(
 	message: ApiMessage,
 	messageIndex: number,
 	allMessages: ApiMessage[],
-	apiHandler: ApiHandler,
 	taskId: string,
 	globalStoragePath: string,
-	options?: RefactorAndTagOptions,
-): Promise<RefactorAndTagResult> {
-	const maxFragments = options?.maxFragments ?? 5
-	const timeoutMs = options?.timeoutMs ?? 60000
-	const systemPrompt = options?.systemPrompt ?? REFACTOR_SYSTEM_PROMPT
+	options?: ChunkOptions,
+): Promise<ChunkResult> {
+	const maxFragments = options?.maxFragments ?? 50
 
-	// Шаг 1: Установить флаг рефакторинга
+	// Шаг 1: Установить флаг разбиения
 	await setRefactoringFlag(taskId, globalStoragePath, `refactor-${messageIndex}`)
 
 	try {
-		// Шаг 2: Извлечь текст и контекст
+		// Шаг 2: Извлечь текст
 		const messageText = extractMessageText(message)
-		const context = extractRelevantContext(allMessages.slice(0, messageIndex))
 
 		if (!messageText.trim()) {
 			// Пустое сообщение — возвращаем fallback
-			const autoTags = generateAutoTags(message)
 			return {
 				fragments: [],
-				tags: autoTags,
+				tags: {
+					direct: [],
+					depends_on: [],
+					depended_by: [],
+					references: {
+						messages: [],
+						files: [],
+						nodes: [],
+					},
+					weights: {},
+					source: "static",
+					schema_version: 1,
+				},
 				source: "fallback",
 				cost: 0,
 			}
 		}
 
-		// Шаг 3: Вызвать LLM
-		const prompt = buildRefactoringPrompt(messageText, context, maxFragments)
-		const requestMessages: Array<{ role: "user" | "assistant"; content: string }> = [
-			{ role: "user", content: prompt },
-		]
+		// Шаг 3: Статическое разбиение по абзацам
+		const paragraphs = messageText.split(/\n\s*\n/).filter(p => p.trim().length > 0)
+		const messageTs = message.ts ?? Date.now()
 
-		let llmResponse = ""
-		let cost = 0
+		// Шаг 4: Создание фрагментов (без тегов)
+		const fragments: ChunkFragment[] = []
+		for (let i = 0; i < Math.min(paragraphs.length, maxFragments); i++) {
+			const text = paragraphs[i].trim()
+			if (!text) continue
 
-		// Вызов LLM с таймаутом
-		const timeoutPromise = new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error("LLM call timed out")), timeoutMs),
-		)
-
-		const streamPromise = (async () => {
-			const stream = apiHandler.createMessage(systemPrompt, requestMessages, {
-				taskId,
-				...(options?.model ? { modelOverride: options.model } : {}),
-			})
-			for await (const chunk of stream) {
-				if (chunk.type === "text") {
-					llmResponse += chunk.text
-				}
-				if (chunk.type === "usage") {
-					cost = (chunk as any).totalCost ?? 0
-				}
-			}
-		})()
-
-		await Promise.race([streamPromise, timeoutPromise])
-
-		// Шаг 4: Парсинг и валидация
-		const parsedFragments = parseLLMResponse(llmResponse)
-
-		if (!parsedFragments || parsedFragments.length === 0) {
-			// Fallback: LLM не вернул валидный ответ
-			const autoTags = generateAutoTags(message)
-			return {
-				fragments: [],
-				tags: autoTags,
-				source: "fallback",
-				cost,
-				error: "LLM response parsing failed, using auto-tags fallback",
-			}
-		}
-
-		// Пофрагментная валидация с fallback
-		const validFragments: RefactoredFragment[] = []
-		const invalidTexts: string[] = []
-
-		for (let i = 0; i < parsedFragments.length; i++) {
-			const raw = parsedFragments[i]
-			if (!raw) continue
-
-			const fragment = convertToMessageFragment(raw, message.ts ?? Date.now(), i)
-
-			if (validateTags(fragment.tags)) {
-				validFragments.push(fragment)
-			} else {
-				// Невалидный фрагмент — собираем текст для fallback
-				invalidTexts.push(raw.text)
-			}
-		}
-
-		// Если есть невалидные фрагменты — мержим их в один fallback
-		if (invalidTexts.length > 0) {
-			const fallbackText = invalidTexts.join("\n\n")
-			const fallbackTags = generateAutoTags({
-				role: "assistant",
-				content: fallbackText,
-				ts: message.ts,
-			} as ApiMessage)
-
-			validFragments.push({
-				chunk_id: `msg-${message.ts ?? Date.now()}-frag-fallback`,
-				text: fallbackText,
-				summary: "Fallback fragment (validation failed)",
-				tags: fallbackTags,
+			fragments.push({
+				chunk_id: `msg-${messageTs}-frag-${i}`,
+				text,
+				summary: text.length > 120 ? text.slice(0, 120) + "..." : text,
+				tags: {
+					direct: [],
+					depends_on: [],
+					depended_by: [],
+					references: {
+						messages: [],
+						files: [],
+						nodes: [],
+					},
+					weights: {},
+					source: "static" as const,
+					schema_version: 1,
+				},
 			})
 		}
 
-		// Шаг 5: Агрегация тегов на уровне сообщения
-		const aggregatedTags = aggregateFragmentTags(validFragments)
+		// Агрегированные (пустые) теги на уровне сообщения
+		const emptyTags: RelevanceTags = {
+			direct: [],
+			depends_on: [],
+			depended_by: [],
+			references: {
+				messages: [],
+				files: [],
+				nodes: [],
+			},
+			weights: {},
+			source: "static",
+			schema_version: 1,
+		}
 
-		// Шаг 6: Атомарное сохранение
-		// Обновляем сообщение с фрагментами и тегами
+		// Шаг 5: Обновляем сообщение с фрагментами
 		const updatedMessage: ApiMessage = {
 			...message,
-			relevance_tags: aggregatedTags,
-			fragments: validFragments.map((f) => ({
+			relevance_tags: emptyTags,
+			fragments: fragments.map((f) => ({
 				chunk_id: f.chunk_id,
 				tags: f.tags,
 			})),
@@ -485,47 +393,40 @@ export async function refactorAndTagMessage(
 		const updatedMessages = [...allMessages]
 		updatedMessages[messageIndex] = updatedMessage
 
-		// Читаем текущий индекс и обновляем его
-		let tagIndex = await readTagIndex({ taskId, globalStoragePath })
-
-		for (const frag of validFragments) {
-			if (!frag.tags) continue
-			for (const tag of frag.tags.direct) {
-				const weight = frag.tags.weights[tag] ?? 0.5
-				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
-			}
-			for (const tag of frag.tags.depends_on) {
-				const weight = frag.tags.weights[tag] ?? 0.5
-				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
-			}
-			for (const tag of frag.tags.depended_by) {
-				const weight = frag.tags.weights[tag] ?? 0.5
-				tagIndex = addChunkToIndex(tagIndex, tag, frag.chunk_id, weight)
-			}
-		}
-
-		await saveMessagesWithIndex(updatedMessages, tagIndex, taskId, globalStoragePath)
+		// Сохраняем сообщения (без tagIndex)
+		await saveApiMessages({ messages: updatedMessages, taskId, globalStoragePath })
 
 		return {
-			fragments: validFragments,
-			tags: aggregatedTags,
-			source: "llm",
-			cost,
+			fragments,
+			tags: emptyTags,
+			source: "static",
+			cost: 0,
 		}
 	} catch (error) {
 		// Fallback при любой ошибке
 		const errorMessage = error instanceof Error ? error.message : String(error)
-		const autoTags = generateAutoTags(message)
 
 		return {
 			fragments: [],
-			tags: autoTags,
+			tags: {
+				direct: [],
+				depends_on: [],
+				depended_by: [],
+				references: {
+					messages: [],
+					files: [],
+					nodes: [],
+				},
+				weights: {},
+				source: "static",
+				schema_version: 1,
+			},
 			source: "fallback",
 			cost: 0,
 			error: errorMessage,
 		}
 	} finally {
-		// Шаг 7: Гарантированное снятие флага
+		// Гарантированное снятие флага
 		await clearRefactoringFlag(taskId, globalStoragePath)
 	}
 }
