@@ -300,10 +300,18 @@ export async function ensureSessionCollection(
 
 /**
  * Guard: проверяет, можно ли запускать RRR-цикл.
- * Если Qdrant недоступен — таймаут/ошибка внутри ensureSessionCollection().
+ * Возвращает true если в настройках есть URL Qdrant.
+ * Если URL пустой — Qdrant не настроен, не лезем чтобы не зависнуть. а почему мы должны зависнуть сразу? если докера нет действительно и мы зависаем в ожидании докера, то надо таймаут ставить по которому будет включаться красный флажок в интерфейсе на индексе с ошибкой. в общем эта фича уже вроде как есть, я хуй знает как там тожно зависнуть
  */
 export function isQdrantConfigured(): boolean {
-	return true
+	try {
+		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+		const url = config.get<string>("qdrantUrl", "")
+		if (!url || url.trim() === "") return false
+		return true
+	} catch {
+		return false
+	}
 }
 
 /**
