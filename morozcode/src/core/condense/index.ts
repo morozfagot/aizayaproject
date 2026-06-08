@@ -16,6 +16,10 @@ import {
 	getVectorSize,
 	ensureSessionCollection,
 	getEmbedderFromCodeIndex,
+	getEmbedderApiKey,
+	getEmbeddingModelId,
+	getEmbedderProvider,
+	getEmbedderBaseUrl,
 	rrrSearch,
 	createDirectEmbedder,
 	isQdrantConfigured,
@@ -481,7 +485,7 @@ ${commandBlocks}
 	// [msg1(parent=X), msg2(parent=X), ..., msgN(parent=X), summary(id=X)]
 	//
 	// Effective for API (filtered by getEffectiveApiHistory):
-	// [summary]  ← Fresh start!
+	// [summary]  в†ђ Fresh start!
 
 	// Tag ALL messages with condenseParent
 	const newMessages = messages.map((msg) => {
@@ -708,156 +712,132 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
 		return msg
 	})
 }
-
 /**
- * Выполняет RRR (Retrieve-Refine-Retrieve) цикл векторного поиска
- * для обогащения контекста релевантными фрагментами сессионной истории.
- * Использует текст промпта напрямую для векторного сходства (без тегов).
+ * Executes RRR (Retrieve-Refine-Retrieve) vector search cycle
+ * for enriching context with relevant session history fragments.
+ * Uses prompt text directly for vector similarity (no tags).
  *
- * @param messages - Полная история API-сообщений
- * @param queryText - Текст промпта пользователя для векторного поиска
- * @param taskId - ID задачи
- * @param globalStoragePath - Путь к глобальному хранилищу
- * @param threshold - Порог релевантности (default 0.0, маппится в score_threshold Qdrant)
- * @returns Объект с отфильтрованной историей и диагностикой RRR
+ * @param messages - Full API message history
+ * @param queryText - User prompt text for vector search
+ * @param taskId - Task ID
+ * @param globalStoragePath - Path to global storage
+ * @param threshold - Relevance threshold (default 0.0, mapped to Qdrant score_threshold)
+ * @returns Object with filtered history and RRR diagnostics
  */
 export async function getEffectiveApiHistoryWithVectorSearch(
- messages: ApiMessage[],
- queryText: string,
- taskId: string,
- globalStoragePath: string,
- threshold: number = 0.0,
+	messages: ApiMessage[],
+	queryText: string,
+	taskId: string,
+	globalStoragePath: string,
+	threshold: number = 0.0,
 ): Promise<{
- messages: ApiMessage[];
- diagnostics: {
- 	findChunksResult: string[];
- 	extractedTsCount: number;
- 	reasonForEmpty?: string;
- };
+	messages: ApiMessage[];
+	diagnostics: {
+		findChunksResult: string[];
+		extractedTsCount: number;
+		reasonForEmpty?: string;
+	};
 }> {
- try {
- 	// GUARD: Проверяем, что Qdrant явно сконфигурирован (не дефолтный localhost)
- 	if (!isQdrantConfigured()) {
- 		console.warn("[getEffectiveApiHistoryWithVectorSearch] Qdrant не сконфигурирован (дефолтный localhost), RRR-цикл пропущен")
- 		return {
- 			messages: [],
- 			diagnostics: {
- 				findChunksResult: [],
- 				extractedTsCount: 0,
- 				reasonForEmpty: "Qdrant не сконфигурирован (дефолтный localhost)",
- 			},
- 		}
- 	}
+	try {
+		// GUARD: Check Qdrant is explicitly configured (not default localhost)
+		if (!isQdrantConfigured()) {
+			return {
+				messages: [],
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: "Qdrant not configured (default localhost)",
+				},
+			}
+		}
 
- 	// Проверяем что есть текст для поиска
- 	if (!queryText || queryText.trim().length === 0) {
- 		console.warn("[getEffectiveApiHistoryWithVectorSearch] Empty query text, skipping RRR")
- 		return {
- 			messages: [],
- 			diagnostics: {
- 				findChunksResult: [],
- 				extractedTsCount: 0,
- 				reasonForEmpty: "Empty query text, skipping RRR",
- 			},
- 		}
- 	}
+		// Check query text is not empty
+		if (!queryText || queryText.trim().length === 0) {
+			return {
+				messages: [],
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: "Empty query text, skipping RRR",
+				},
+			}
+		}
 
- 	// Получаем конфигурацию Qdrant
- 	const qdrantConfig = getQdrantConfig()
- 	const vectorSize = getVectorSize()
+		// Get Qdrant config and vector size
+		const qdrantConfig = getQdrantConfig()
+		const vectorSize = getVectorSize()
 
- 	// Получаем embedder (пытаемся через CodeIndexManager, фолбэк на прямой)
- 	let embedFunction: ((text: string) => Promise<number[]>) | null = null
+		// Get embedder using unified key resolution (env vars > VS Code config)
+		const apiKey = getEmbedderApiKey()
+		if (!apiKey) {
+			return {
+				messages: [],
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: "No embedder API key available",
+				},
+			}
+		}
 
- 	// Пытаемся через VSCode ExtensionContext если доступен
- 	try {
- 		const { getEmbedderFromCodeIndex } = await import("./sessionQdrant")
- 		// We can't easily get context here, so try direct approach first
- 	} catch {
- 		// ignore
- 	}
+		const embedderObj = createDirectEmbedder(apiKey)
+		const embedFunction = embedderObj.embedFunction
 
- 	// Через конфиг VS Code
- 	try {
- 		const config = require("vscode").workspace.getConfiguration("roo-code.codebaseIndex")
- 		const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
- 		if (apiKey) {
- 			const embedderObj = createDirectEmbedder(apiKey)
- 			embedFunction = embedderObj.embedFunction
- 		}
- 	} catch {
- 		// VS Code API not available in this context
- 	}
+		// Create/get session collection
+		const workspacePath = globalStoragePath || qdrantConfig.url
+		const { client, collectionName } = await ensureSessionCollection(
+			workspacePath,
+			qdrantConfig.url,
+			vectorSize,
+			qdrantConfig.apiKey,
+		)
 
- 	if (!embedFunction) {
- 		console.warn("[getEffectiveApiHistoryWithVectorSearch] No embedder available, skipping RRR")
- 		return {
- 			messages: [],
- 			diagnostics: {
- 				findChunksResult: [],
- 				extractedTsCount: 0,
- 				reasonForEmpty: "No embedder available, skipping RRR",
- 			},
- 		}
- 	}
+		// Run RRR cycle
+		const rrrResult = await rrrSearch(
+			embedFunction,
+			client,
+			collectionName,
+			queryText,
+			taskId,
+			3, // maxIterations
+			3, // fragmentsPerIteration
+			threshold, // scoreThreshold
+		)
+		const { messageTsSet, chunkIds } = rrrResult
 
- 	// Создаём/получаем сессионную коллекцию
- 	const workspacePath = globalStoragePath || qdrantConfig.url
- 	const { client, collectionName } = await ensureSessionCollection(
- 		workspacePath,
- 		qdrantConfig.url,
- 		vectorSize,
- 		qdrantConfig.apiKey,
- 	)
+		if (messageTsSet.size === 0) {
+			return {
+				messages: [],
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: "RRR found no relevant fragments (messageTsSet empty after RRR cycle)",
+				},
+			}
+		}
 
- 	// Запускаем RRR цикл
- 	const rrrResult = await rrrSearch(
- 		embedFunction,
- 		client,
- 		collectionName,
- 		queryText,
- 		taskId,
- 		3, // maxIterations
- 		3, // fragmentsPerIteration
- 		threshold, // scoreThreshold
- 	)
- 	const { messageTsSet, chunkIds } = rrrResult
+		// Filter messages by found messageTs
+		const filtered = messages.filter((msg) => msg.ts != null && messageTsSet.has(String(msg.ts)))
 
- 	if (messageTsSet.size === 0) {
- 		console.log("[getEffectiveApiHistoryWithVectorSearch] RRR found no relevant fragments, returning empty")
- 		return {
- 			messages: [],
- 			diagnostics: {
- 				findChunksResult: [],
- 				extractedTsCount: 0,
- 				reasonForEmpty: "RRR found no relevant fragments",
- 			},
- 		}
- 	}
-
- 	// Фильтруем сообщения по найденным messageTs
- 	const filtered = messages.filter((msg) => msg.ts != null && messageTsSet.has(String(msg.ts)))
- 	console.log(
- 		`[getEffectiveApiHistoryWithVectorSearch] RRR found ${messageTsSet.size} relevant messages, filtered ${filtered.length}/${messages.length}`,
- 	)
- 	return {
- 		messages: filtered,
- 		diagnostics: {
- 			findChunksResult: chunkIds,
- 			extractedTsCount: messageTsSet.size,
- 		},
- 	}
- } catch (error) {
- 	console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
- 	return {
- 		messages: [],
- 		diagnostics: {
- 			findChunksResult: [],
- 			extractedTsCount: 0,
- 			reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
- 		},
- 	}
- }
+		return {
+			messages: filtered,
+			diagnostics: {
+				findChunksResult: chunkIds,
+				extractedTsCount: messageTsSet.size,
+			},
+		}
+	} catch (error) {
+		console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
+		return {
+			messages: [],
+			diagnostics: {
+				findChunksResult: [],
+				extractedTsCount: 0,
+				reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
+			},
+		}
+	}
 }
+
 
 export { isQdrantConfigured }

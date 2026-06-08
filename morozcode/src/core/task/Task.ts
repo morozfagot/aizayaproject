@@ -1,4 +1,4 @@
-﻿import * as path from "path"
+import * as path from "path"
 import * as vscode from "vscode"
 import os from "os"
 import crypto from "crypto"
@@ -504,9 +504,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.dynamicModelSelector = new DynamicModelSelector()
 		this.autoApprovalHandler = new AutoApprovalHandler()
 
-		// Pipeline Logger — логи пишутся в рабочую директорию
-		const pipelineLogDir = "C:\\Users\\Евгений\\Desktop\\AIZaya\\morozcode-logs"
-		this.pipelineLogger = new PipelineLogger(this.taskId, pipelineLogDir)
+		// Pipeline Logger � ���� ������� � ������� ����������
+		const pipelineLogDir = "C:\\Users\\�������\\Desktop\\AIZaya\\morozcode-logs"
+		this.pipelineLogger = new PipelineLogger(this.taskId, pipelineLogDir, Package.version)
 
 		this.consecutiveMistakeLimit = consecutiveMistakeLimit ?? DEFAULT_CONSECUTIVE_MISTAKE_LIMIT
 		this.providerRef = new WeakRef(provider)
@@ -1988,7 +1988,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					// intact. The summary message carries critical metadata (isSummary, condenseId)
 					// that getEffectiveApiHistory() uses to filter out condensed messages.
 					// Removing or merging it would destroy this metadata, causing all condensed
-					// messages to become "orphaned" and restored to active status — effectively
+					// messages to become "orphaned" and restored to active status � effectively
 					// undoing the condensation and sending the full history to the API.
 					// See: https://github.com/RooCodeInc/Roo-Code/issues/11487
 					modifiedApiConversationHistory = [...existingApiConversationHistory]
@@ -2675,23 +2675,37 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const streamModelInfo = this.cachedStreamingModel.info
 				const cachedModelId = this.cachedStreamingModel.id
 
-				// Hybrid Relevance Pipeline: ����������� ������� ����� API-��������
-				// ��������� ����� ����������������� ������� �� currentUserContent
+				// Hybrid Relevance Pipeline: Enrich context via Qdrant RRR before API request
 				const userTextContent = currentUserContent
 					.filter((block): block is Anthropic.TextBlockParam => block.type === "text")
 					.map((block) => block.text)
 					.join("\n")
 
-				if (userTextContent.trim().length > 0) {
-					// RRR-предиктор: векторный поиск через Qdrant (заменяет generatePromptTags)
-					// Промпт пользователя напрямую идёт в Qdrant для поиска похожих фрагментов
-					console.log(
-						`[Task#${this.taskId}] RRR vector search: prompt length=${userTextContent.length}`,
-					)
+				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
+					try {
+						const enrichmentResult = await getEffectiveApiHistoryWithVectorSearch(
+							this.apiConversationHistory,
+							userTextContent,
+							this.taskId,
+							this.globalStoragePath,
+							0.0,
+						)
+						if (enrichmentResult.messages.length > 0) {
+							this.apiConversationHistory = [
+								...enrichmentResult.messages,
+								...this.apiConversationHistory,
+							]
+							console.log(
+								`[Task#${this.taskId}] RRR enrichment: ${enrichmentResult.messages.length} messages, ${enrichmentResult.diagnostics.extractedTsCount} unique Ts`,
+							)
+						}
+					} catch (error) {
+						console.warn(`[Task#${this.taskId}] RRR enrichment failed:`, error)
+					}
 				}
 
-				// Dynamic Model Selection: выбор оптимальной модели через OpenRouter
-				// Активируется когда выбран профиль "Dynamic Model Selection" в API Configuration
+				// Dynamic Model Selection: ����� ����������� ������ ����� OpenRouter
+				// ������������ ����� ������ ������� "Dynamic Model Selection" � API Configuration
 				let originalApi: ApiHandler | undefined
 				let apiWasSwapped = false
 				if (this._dynamicModelSelectorActive) {
@@ -2723,7 +2737,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								})
 								apiWasSwapped = true
 								console.log(
-									`[Task#${this.taskId}] Dynamic model selection: ${currentModelId} → ${selectionResult.model.modelId} (${selectionResult.selectionReason})`,
+									`[Task#${this.taskId}] Dynamic model selection: ${currentModelId} > ${selectionResult.model.modelId} (${selectionResult.selectionReason})`,
 								)
 							} else {
 								console.log(
@@ -3553,9 +3567,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					)
 					this.assistantMessageSavedToHistory = true
 	
-					// RAG Step 5: Разбиение ответа модели на фрагменты
-					// Вызывается ПОСЛЕ сохранения assistant message в apiConversationHistory
-					// NOTE: модель для тегирования — передаётся через modelOverride в metadata (OpenRouter)
+					// RAG Step 5: ��������� ������ ������ �� ���������
+					// ���������� ����� ���������� assistant message � apiConversationHistory
+					// NOTE: ������ ��� ����������� � ��������� ����� modelOverride � metadata (OpenRouter)
 					this.pipelineLogger.startStep()
 					let step5Status: "success" | "fallback" | "error" = "success"
 					let step5Details: Record<string, unknown> = { source: "llm", fragmentsCount: 0, modelUsed: "nvidia/nemotron-3-ultra-550b-a55b:free", chunkIds: [] as string[], originalResponse: "" }
@@ -3572,7 +3586,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								this.globalStoragePath,
 							)
 							console.log(`[Task#${this.taskId}] chunkMessage completed for message ${lastMessageIndex}`)
-							// Заполняем details из результата разбиения
+							// ��������� details �� ���������� ���������
 							step5Details.source = chunkResult.source
 							step5Details.fragmentsCount = chunkResult.fragments.length
 							step5Details.chunkIds = chunkResult.fragments.map((f) => f.chunk_id)
@@ -3580,7 +3594,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							step5Details.originalResponse = originalResponse
 						}
 					} catch (error) {
-						// Fallback: продолжаем без тегирования
+						// Fallback: ���������� ��� �����������
 						step5Status = "fallback"
 						step5Details.source = "fallback"
 						step5Details.error = error instanceof Error ? error.message : String(error)
@@ -3589,13 +3603,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						)
 					}
 
-					// Логирование шага 5 (chunkMessage)
+					// ����������� ���� 5 (chunkMessage)
 					await this.pipelineLogger.logStep(5, step5Status, step5Details, {
 						originalResponse: typeof step5Details.originalResponse === "string" ? step5Details.originalResponse : undefined,
 						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
 					})
 	
-					// Логирование шага 6 (сохранение фрагментов)
+					// ����������� ���� 6 (���������� ����������)
 					this.pipelineLogger.startStep()
 					await this.pipelineLogger.logStep(6, step5Status, {
 						fragmentIds: step5Details.chunkIds ?? [],
@@ -3606,8 +3620,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						modelUsed: typeof step5Details.modelUsed === "string" ? step5Details.modelUsed : this.api.getModel().id,
 					})
 
-					// Qdrant-индексация фрагментов (Шаг 6.5)
-					// Сохраняем фрагменты в векторную БД для RRR цикла
+					// Qdrant-���������� ���������� (��� 6.5)
+					// ��������� ��������� � ��������� �� ��� RRR �����
 					if (step5Status === "success" && typeof chunkResult !== "undefined" && chunkResult.fragments.length > 0) {
 						try {
 							const lastMessageTs = this.apiConversationHistory[this.apiConversationHistory.length - 1]?.ts
@@ -3622,7 +3636,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 									qdrantCfg.apiKey,
 								)
 
-								// Получаем embedder из конфига
+								// �������� embedder �� �������
 								const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
 								const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
 								if (apiKey) {
@@ -3669,7 +3683,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								}
 							}
 						} catch (qdrantError) {
-							// Non-fatal: индексация не должна прерывать основной поток
+							// Non-fatal: ���������� �� ������ ��������� �������� �����
 							console.warn(`[Task#${this.taskId}] Qdrant indexing skipped (non-fatal):`, qdrantError instanceof Error ? qdrantError.message : String(qdrantError))
 						}
 					}
@@ -4130,7 +4144,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		// Update last request time right before making the request so that subsequent
-		// requests — even from new subtasks — will honour the provider's rate-limit.
+		// requests � even from new subtasks � will honour the provider's rate-limit.
 		//
 		// NOTE: When recursivelyMakeClineRequests handles rate limiting, it sets the
 		// timestamp earlier to include the environment details build. We still set it
@@ -4313,7 +4327,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Get the effective API history by filtering out condensed messages
 		// This allows non-destructive condensing where messages are tagged but not deleted,
 		// enabling accurate rewind operations while still sending condensed history to the API.
-		// RRR-цикл: векторный поиск через Qdrant напрямую по тексту промпта
+		// RRR-����: ��������� ����� ����� Qdrant �������� �� ������ �������
 		let effectiveHistory: ApiMessage[]
 		let enrichedContext = false
 		let tagMatchDetails: Record<string, number> = {}
@@ -4322,10 +4336,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.pipelineLogger.startStep()
 			const vectorSearchResult = await getEffectiveApiHistoryWithVectorSearch(
 				this.apiConversationHistory,
-				"",
+				this.getLastUserMessageText(),
 				this.taskId,
 				this.globalStoragePath,
-				4.0,
+				0.7,
 			)
 			rrrDiagnostics = vectorSearchResult.diagnostics
 			// Fallback: vector-filter must not zero out context
@@ -4345,10 +4359,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 		}
 
-		// Логирование шага 3 (getEffectiveApiHistoryWithVectorSearch)
+		// ����������� ���� 3 (getEffectiveApiHistoryWithVectorSearch)
 		const totalHistory = this.apiConversationHistory.length
 		const filteredCount = effectiveHistory.length
-		const requestSummary = `История: ${totalHistory} сообщений, отфильтровано: ${totalHistory - filteredCount}, осталось: ${filteredCount}, обогащение контекста: ${enrichedContext}`
+		const requestSummary = `�������: ${totalHistory} ���������, �������������: ${totalHistory - filteredCount}, ��������: ${filteredCount}, ���������� ���������: ${enrichedContext}`
 		await this.pipelineLogger.logStep(3, "success", {
 			messagesFiltered: totalHistory - filteredCount,
 			chunksFound: filteredCount,
@@ -4449,7 +4463,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
-		// Начинаем замер времени для шага 4 (api.createMessage) ДО вызова API
+		// �������� ����� ������� ��� ���� 4 (api.createMessage) �� ������ API
 		this.pipelineLogger.startStep()
 
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
@@ -4492,12 +4506,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			yield firstChunk.value
 			this.isWaitingForFirstChunk = false
 
-			// Формируем сводку по ролям отправленных сообщений
+			// ��������� ������ �� ����� ������������ ���������
 			const userCount = cleanConversationHistory.filter((m: any) => m.role === "user").length
 			const assistantCount = cleanConversationHistory.filter((m: any) => m.role === "assistant").length
-			const messagesSummary = `Всего: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, обогащение: ${enrichedContext}`
+			const messagesSummary = `�����: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, ����������: ${enrichedContext}`
 
-			// Логирование шага 4 (api.createMessage) — реальный замер времени ожидания первого чанка
+			// ����������� ���� 4 (api.createMessage) � �������� ����� ������� �������� ������� �����
 			await this.pipelineLogger.logStep(4, "success", {
 				enrichedContext,
 				tagMatchDetails,
@@ -4516,12 +4530,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.isWaitingForFirstChunk = false
 			this.currentRequestAbortController = undefined
 
-			// Логирование шага 4 с ошибкой (таймаут или другая ошибка первого чанка)
+			// ����������� ���� 4 � ������� (������� ��� ������ ������ ������� �����)
 			const errorMessage = error instanceof Error ? error.message : String(error)
 			const isTimeout = errorMessage.includes("timed out")
 			const userCount = cleanConversationHistory.filter((m: any) => m.role === "user").length
 			const assistantCount = cleanConversationHistory.filter((m: any) => m.role === "assistant").length
-			const messagesSummary = `Всего: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, обогащение: ${enrichedContext}`
+			const messagesSummary = `�����: ${cleanConversationHistory.length}, user: ${userCount}, assistant: ${assistantCount}, ����������: ${enrichedContext}`
 			await this.pipelineLogger.logStep(4, isTimeout ? "error" : "error-fatal", {
 				enrichedContext,
 				tagMatchDetails,
@@ -4942,6 +4956,30 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 *
 	 * @param context - Context string for logging (e.g., the calling tool name)
 	 */
+	/**
+	 * Extract text content from the last user message in apiConversationHistory.
+	 * Used as queryText for RRR vector search.
+	 */
+	private getLastUserMessageText(): string {
+		for (let i = this.apiConversationHistory.length - 1; i >= 0; i--) {
+			const msg = this.apiConversationHistory[i]
+			if (msg.role === "user") {
+				if (typeof msg.content === "string") {
+					return msg.content
+				}
+				if (Array.isArray(msg.content)) {
+					const textBlocks = msg.content.filter(
+						(block): block is { type: "text"; text: string } => block.type === "text",
+					)
+					if (textBlocks.length > 0) {
+						return textBlocks.map((b) => b.text).join("\n")
+					}
+				}
+			}
+		}
+		return ""
+	}
+
 	public processQueuedMessages(): void {
 		try {
 			if (!this.messageQueueService.isEmpty()) {
@@ -4959,3 +4997,4 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 }
+

@@ -2,6 +2,7 @@ import { QdrantClient } from "@qdrant/js-client-rest"
 import { createHash } from "crypto"
 import * as vscode from "vscode"
 
+import type { EmbedderProvider } from "@roo-code/types"
 import { CodeIndexManager } from "../../services/code-index/manager"
 import { OpenAICompatibleEmbedder } from "../../services/code-index/embedders/openai-compatible"
 import { getModelDimension } from "../../shared/embeddingModels"
@@ -13,23 +14,76 @@ import { getModelDimension } from "../../shared/embeddingModels"
 const SESSION_COLLECTION_PREFIX = "session_"
 
 /**
- * Average multiple vectors element-wise.
+ * Get API key for embedding from environment variables or VS Code config.
+ * Priority: env vars > VS Code config.
  */
-export function averageVectors(vectors: number[][]): number[] {
-	if (vectors.length === 0) return []
-	if (vectors.length === 1) return vectors[0]!
+export function getEmbedderApiKey(): string | undefined {
+	// Priority 1: Environment variables
+	const envKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY
+	if (envKey && envKey.trim().length > 0) {
+		return envKey.trim()
+	}
 
-	const dim = vectors[0]!.length
-	const avg = new Array(dim).fill(0)
-	for (const vec of vectors) {
-		for (let i = 0; i < dim; i++) {
-			avg[i] += vec[i]!
+	// Priority 2: VS Code configuration
+	try {
+		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+		const openAiKey = config.get<string>("openAiKey")
+		if (openAiKey && openAiKey.trim().length > 0) {
+			return openAiKey.trim()
 		}
+		const openRouterKey = config.get<string>("openRouterKey", "")
+		if (openRouterKey && openRouterKey.trim().length > 0) {
+			return openRouterKey.trim()
+		}
+	} catch {
+		// VS Code API not available
 	}
-	for (let i = 0; i < dim; i++) {
-		avg[i] /= vectors.length
+
+	return undefined
+}
+
+/**
+ * Get embedding model ID from VS Code config or environment.
+ */
+export function getEmbeddingModelId(): string | undefined {
+	try {
+		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+		const modelId = config.get<string>("embeddingModelId")
+		if (modelId) return modelId
+	} catch {
+		// ignore
 	}
-	return avg
+	return process.env.EMBEDDING_MODEL_ID || undefined
+}
+
+/**
+ * Get embedder provider from VS Code config or environment.
+ */
+export function getEmbedderProvider(): EmbedderProvider {
+	try {
+		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+		return (config.get<string>("embedderProvider", "openrouter") as EmbedderProvider)
+	} catch {
+		return "openrouter"
+	}
+}
+
+/**
+ * Get base URL for the embedder provider.
+ */
+export function getEmbedderBaseUrl(provider: EmbedderProvider): string {
+	if (provider === "openai") {
+		return "https://api.openai.com/v1"
+	}
+	if (provider === "openrouter") {
+		return "https://openrouter.ai/api/v1"
+	}
+	try {
+		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+		return config.get<string>("openAiCompatibleBaseUrl", "https://openrouter.ai/api/v1")
+	} catch {
+		return "https://openrouter.ai/api/v1"
+	}
 }
 
 /**
@@ -44,29 +98,19 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 		}
 
 		// Try to get vector size from config
-		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
-		const embedderProvider = config.get<string>("embedderProvider", "openai")
-		const modelId = config.get<string>("embeddingModelId")
-		const dimension = modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider)
-
-		// We cannot access the internal embedder directly from manager,
-		// so we create a lightweight one using the same config
-		const openAiKey = config.get<string>("openAiKey") || config.get<string>("openAiNativeApiKey", "")
-		const openRouterKey = config.get<string>("openRouterKey", "")
-		const apiKey = openAiKey || openRouterKey
-
-		if (!apiKey) return null
-
-		// Determine base URL
-		let baseUrl: string
-		if (embedderProvider === "openai") {
-			baseUrl = "https://api.openai.com/v1"
-		} else if (embedderProvider === "openrouter") {
-			baseUrl = "https://openrouter.ai/api/v1"
-		} else {
-			baseUrl = config.get<string>("openAiCompatibleBaseUrl", "https://api.openai.com/v1")
+		const embedderProvider = getEmbedderProvider()
+		const modelId = getEmbeddingModelId()
+		const dimension = modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider, "text-embedding-3-small")
+		if (!dimension) {
+			console.warn(`[sessionQdrant] Could not determine vector dimension for provider=${embedderProvider}, modelId=${modelId}, falling back to 1024`)
+			return null
 		}
 
+		// Get API key (env vars > VS Code config)
+		const apiKey = getEmbedderApiKey()
+		if (!apiKey) return null
+
+		const baseUrl = getEmbedderBaseUrl(embedderProvider)
 		const embedder = new OpenAICompatibleEmbedder(baseUrl, apiKey, modelId || undefined)
 		return {
 			embedFunction: async (text: string) => {
@@ -81,12 +125,13 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 
 /**
  * Create a direct OpenAI-compatible embedder for session embedding.
- * Uses environment-based configuration.
+ * Uses environment-based configuration with VS Code config fallback.
  */
-export function createDirectEmbedder(apiKey: string, baseUrl?: string, modelId?: string): { embedFunction: (text: string) => Promise<number[]> } {
-	const url = baseUrl || "https://openrouter.ai/api/v1"
-	const model = modelId || "qwen/qwen3-embedding-8b"
-	const embedder = new OpenAICompatibleEmbedder(url, apiKey, model)
+export function createDirectEmbedder(apiKey?: string, baseUrl?: string, modelId?: string): { embedFunction: (text: string) => Promise<number[]> } {
+	const resolvedApiKey = apiKey || getEmbedderApiKey() || ""
+	const url = baseUrl || getEmbedderBaseUrl(getEmbedderProvider())
+	const model = modelId || getEmbeddingModelId() || "qwen/qwen3-embedding-8b"
+	const embedder = new OpenAICompatibleEmbedder(url, resolvedApiKey, model)
 	return {
 		embedFunction: async (text: string) => {
 			const result = await embedder.createEmbeddings([text])
@@ -191,10 +236,21 @@ export async function rrrSearch(
 	let currentVector = await embedFunction(queryText)
 	const seenIds = new Set<string>()
 
+	console.log(`[rrrSearch] Starting RRR cycle: query="${queryText.substring(0, 100)}...", threshold=${scoreThreshold}, maxIter=${maxIterations}, limit=${fragmentsPerIteration}`)
+
 	for (let iter = 0; iter < maxIterations; iter++) {
 		const results = await searchWithFilter(client, collectionName, currentVector, taskId, scoreThreshold, fragmentsPerIteration)
 
-		if (results.length === 0) break
+		console.log(`[rrrSearch] Iteration ${iter + 1}/${maxIterations}: found ${results.length} results`)
+
+		if (results.length === 0) {
+			console.log(`[rrrSearch] No results at iteration ${iter + 1}, stopping RRR cycle`)
+			break
+		}
+
+		// Log scores for diagnostics
+		const scores = results.map((r) => r.score.toFixed(4))
+		console.log(`[rrrSearch] Iteration ${iter + 1} scores: [${scores.join(", ")}]`)
 
 		const newVectors: number[][] = [currentVector]
 		let foundNew = false
@@ -228,13 +284,38 @@ export async function rrrSearch(
 			}
 		}
 
-		if (!foundNew) break
+		if (!foundNew) {
+			console.log(`[rrrSearch] No new unique results at iteration ${iter + 1}, stopping RRR cycle`)
+			break
+		}
 
 		// Refine: average current vector with fragment vectors
 		currentVector = averageVectors(newVectors)
 	}
 
+	console.log(`[rrrSearch] RRR cycle complete: ${messageTsSet.size} unique messageTs, ${chunkIds.length} unique chunkIds`)
+
 	return { messageTsSet, chunkIds }
+}
+
+/**
+ * Average multiple vectors element-wise.
+ */
+export function averageVectors(vectors: number[][]): number[] {
+	if (vectors.length === 0) return []
+	if (vectors.length === 1) return vectors[0]!
+
+	const dim = vectors[0]!.length
+	const avg = new Array(dim).fill(0)
+	for (const vec of vectors) {
+		for (let i = 0; i < dim; i++) {
+			avg[i] += vec[i]!
+		}
+	}
+	for (let i = 0; i < dim; i++) {
+		avg[i] /= vectors.length
+	}
+	return avg
 }
 
 /**
@@ -309,12 +390,11 @@ export async function ensureSessionCollection(
 /**
  * Guard: проверяет, можно ли запускать RRR-цикл.
  * Возвращает true если в настройках есть URL Qdrant.
- * Если URL пустой — Qdrant не настроен, не лезем чтобы не зависнуть. а почему мы должны зависнуть сразу? если докера нет действительно и мы зависаем в ожидании докера, то надо таймаут ставить по которому будет включаться красный флажок в интерфейсе на индексе с ошибкой. в общем эта фича уже вроде как есть, я хуй знает как там тожно зависнуть
  */
 export function isQdrantConfigured(): boolean {
 	try {
 		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
-		const url = config.get<string>("qdrantUrl", "")
+		const url = config.get<string>("qdrantUrl", "http://localhost:6333")
 		if (!url || url.trim() === "") return false
 		return true
 	} catch {
@@ -341,10 +421,10 @@ export function getQdrantConfig(): { url: string; apiKey?: string } {
  */
 export function getVectorSize(): number {
 	try {
-		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
-		const embedderProvider = config.get<string>("embedderProvider", "openai")
-		const modelId = config.get<string>("embeddingModelId")
-		return modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider)
+		const embedderProvider = getEmbedderProvider()
+		const modelId = getEmbeddingModelId()
+		const dimension = modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider, "text-embedding-3-small")
+		return dimension ?? 1024 // fallback default
 	} catch {
 		return 1024 // fallback default
 	}
