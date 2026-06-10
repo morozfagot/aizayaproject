@@ -23,6 +23,7 @@ import {
 	rrrSearch,
 	createDirectEmbedder,
 	isQdrantConfigured,
+	workspaceSearch,
 } from "./sessionQdrant"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
@@ -840,4 +841,5 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 }
 
 
-export { isQdrantConfigured }
+export { isQdrantConfigured, workspaceSearch }
+export type { WorkspaceSearchResult } from "./sessionQdrant"

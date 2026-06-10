@@ -1,0 +1,57 @@
+# .editorconfig
+# Универсальные настройки кодировки и форматирования для проекта morozcode
+# https://editorconfig.org/
+
+root = true
+
+# Все файлы: UTF-8, LF, пробелы
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# TypeScript / JavaScript
+[*.{ts,tsx,js,jsx,mjs,cjs}]
+indent_style = tab
+indent_size = 4
+
+# JSON
+[*.json]
+indent_style = tab
+indent_size = 4
+
+# YAML
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Markdown
+[*.md]
+trim_trailing_whitespace = false
+
+# Shell scripts
+[*.{sh,bash}]
+end_of_line = lf
+
+# PowerShell
+[*.ps1]
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+# Batch files
+[*.{bat,cmd}]
+end_of_line = crlf
+
+# package.json — особый случай
+[package.json]
+indent_style = space
+indent_size = 2
+
+# pnpm-lock.yaml — не трогать
+[pnpm-lock.yaml]
+indent_style = space
+indent_size = 2

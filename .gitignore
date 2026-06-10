@@ -35,5 +35,8 @@ logs/
 # Docker
 docker-compose.override.yml
 
+# Qdrant data
+qdrant_data/
+
 # Large binary files
 releases/*.png

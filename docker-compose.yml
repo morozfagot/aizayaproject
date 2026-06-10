@@ -1,5 +1,3 @@
-version: "3.8"
-
 # ============================================================
 # docker-compose.yml — VPS (Германия)
 # Сервисы: Qdrant + WireGuard VPN Server
@@ -20,42 +18,42 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - ../qdrant_data:/qdrant/storage
     restart: unless-stopped
     networks:
       - aizaya-network
 
   # ----------------------------------------------------------
-  # WireGuard VPN Server
+  # WireGuard VPN Server (раскомментировать для VPS)
   # Образ: linuxserver/wireguard
   # Порт: 51820/UDP
   # ----------------------------------------------------------
-  wireguard:
-    image: lscr.io/linuxserver/wireguard:latest
-    container_name: wireguard
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Berlin
-      - SERVERURL=${WG_SERVER_URL}
-      - SERVERPORT=51820
-      - PEERS=${WG_PEERS}
-      - PEERDNS=${WG_PEER_DNS}
-      - ALLOWEDIPS=${WG_ALLOWED_IPS}
-      - INTERNAL_SUBNET=${WG_INTERNAL_SUBNET}
-    volumes:
-      - ./wireguard/config:/config
-      - /lib/modules:/lib/modules
-    ports:
-      - "51820:51820/udp"
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    networks:
-      - aizaya-network
+  # wireguard:
+  #   image: lscr.io/linuxserver/wireguard:latest
+  #   container_name: wireguard
+  #   cap_add:
+  #     - NET_ADMIN
+  #     - SYS_MODULE
+  #   environment:
+  #     - PUID=1000
+  #     - PGID=1000
+  #     - TZ=Europe/Berlin
+  #     - SERVERURL=${WG_SERVER_URL:-localhost}
+  #     - SERVERPORT=51820
+  #     - PEERS=${WG_PEERS:-1}
+  #     - PEERDNS=${WG_PEER_DNS:-auto}
+  #     - ALLOWEDIPS=${WG_ALLOWED_IPS:-0.0.0.0/0}
+  #     - INTERNAL_SUBNET=${WG_INTERNAL_SUBNET:-10.13.13.0}
+  #   volumes:
+  #     - ./wireguard/config:/config
+  #     - /lib/modules:/lib/modules
+  #   ports:
+  #     - "51820:51820/udp"
+  #   sysctls:
+  #     - net.ipv4.conf.all.src_valid_mark=1
+  #   restart: unless-stopped
+  #   networks:
+  #     - aizaya-network
 
   # webapi:
   #   build: ./src/API/AIZaya.Api

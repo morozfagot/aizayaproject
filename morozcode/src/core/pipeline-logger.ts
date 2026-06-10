@@ -7,6 +7,8 @@ import * as path from "path"
  * и метаданные модели для динамического анализа нейронкой.
  */
 export interface PipelineLogEntry {
+	/** Версия плагина */
+	pluginVersion: string
 	timestamp: string
 	taskId: string
 	step: 1 | 2 | 3 | 4 | 5 | 6
@@ -36,9 +38,10 @@ export class PipelineLogger {
 	private readonly taskId: string
 	private currentStepStart: number = 0
 
-	constructor(taskId: string, logDir: string) {
+	constructor(taskId: string, logDir: string, pluginVersion: string) {
 		this.taskId = taskId
 		this.logDir = logDir
+		this.pluginVersion = pluginVersion
 	}
 
 	/**

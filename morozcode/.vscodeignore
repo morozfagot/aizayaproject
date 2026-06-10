@@ -44,8 +44,12 @@ AGENTS.md
 **/__tests__/**
 **/tests/**
 
-# Зависимости разработки
+# Зависимости разработки (все node_modules включая вложенные)
 node_modules/**
+src/node_modules/**
+webview-ui/node_modules/**
+apps/**/node_modules/**
+packages/**/node_modules/**
 .pnpm-store/**
 
 # Билд-артефакты
