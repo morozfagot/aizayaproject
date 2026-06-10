@@ -4,13 +4,13 @@
 
 ## Репозиторий
 
-- **Путь:** `C:\Users\Евгений\Desktop\AIWorkFlowContext\AiZayaProject`
+- **Путь:** `C:\Users\Moroz\Desktop\AIWorkFlowContext\AiZayaProject`
 - **Remote:** `origin` → `https://github.com/morozfagot/aizayaproject.git`
 - **Ветка по умолчанию:** `developer`
 
 ## Правила
 
-- Рабочая директория для ВСЕХ git-команд локального репозитория C:\Users\Евгений\Desktop\AIWorkFlowContext\AiZayaProject: `AiZayaProject/`
+- Рабочая директория для ВСЕХ git-команд локального репозитория C:\Users\Moroz\Desktop\AIWorkFlowContext\AiZayaProject: `AiZayaProject/`
 - Формат коммитов: `[тип]: краткое описание` (только русский язык)
 - Типы: feat, fix, refactor, docs, chore, test
 - ПОСЛЕ КАЖДОГО commit → ОБЯЗАТЕЛЬНО `git push origin <branch>`

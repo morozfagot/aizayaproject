@@ -23,7 +23,7 @@
 - Сменить пароль на свой
 
 ### 3. Перенести рабочую директорию
-Скопировать содержимое `C:\Users\Евгений\Desktop\AIWorkFlowContext` в `C:\Users\evgeny\Desktop\AIWorkFlowContext`
+Скопировать содержимое `C:\Users\Moroz\Desktop\AIWorkFlowContext` в `C:\Users\Moroz\Desktop\AIWorkFlowContext`
 
 ### 4. Проверить что всё работает
 ```powershell
