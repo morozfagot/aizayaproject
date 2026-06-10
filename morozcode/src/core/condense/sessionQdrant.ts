@@ -176,18 +176,10 @@ export async function searchWithFilter(
 }
 
 /**
-	* Search Qdrant for messages similar to the given query text.
-	* Returns message timestamps with their similarity scores.
-	* Used by RRR-predictor to extract relevance tags from Qdrant.
-	*
-	* @param embedFunction - Function that converts text to embedding vector
-	* @param client - Qdrant client
-	* @param collectionName - Qdrant collection name
-	* @param queryText - Text to search for
-	* @param taskId - Task ID filter
-	* @param limit - Max results to return (default: 5)
-	* @returns Array of { messageTs, score } sorted by score descending
-	*/
+ * Search Qdrant for messages similar to the given query text.
+ * Returns message timestamps with their similarity scores.
+ * Used by RRR-predictor to extract relevance tags from Qdrant.
+ */
 export async function searchSimilarMessages(
 	embedFunction: (text: string) => Promise<number[]>,
 	client: QdrantClient,
@@ -208,17 +200,7 @@ export async function searchSimilarMessages(
 }
 
 /**
-	* RRR (Retrieve-Refine-Retrieve) iterative vector search.
- *
- * @param embedFunction - Function that converts text to embedding vector
- * @param client - Qdrant client
- * @param collectionName - Qdrant collection name
- * @param queryText - Text to search for
- * @param taskId - Task ID filter
- * @param maxIterations - Maximum RRR iterations (default: 3)
- * @param fragmentsPerIteration - Fragments to retrieve per iteration (default: 3)
- * @param scoreThreshold - Minimum score threshold (default: 0.0)
- * @returns Object with messageTsSet (Set of unique messageTs) and chunkIds (array of unique chunk IDs)
+ * RRR (Retrieve-Refine-Retrieve) iterative vector search.
  */
 export async function rrrSearch(
 	embedFunction: (text: string) => Promise<number[]>,
@@ -321,12 +303,6 @@ export function averageVectors(vectors: number[][]): number[] {
 /**
  * Ensure the session history collection exists in Qdrant.
  * Creates it if necessary.
- *
- * @param workspacePath - Workspace path for collection name generation
- * @param qdrantUrl - Qdrant server URL
- * @param vectorSize - Embedding vector dimension
- * @param apiKey - Optional Qdrant API key
- * @returns QdrantClient and collection name
  */
 export async function ensureSessionCollection(
 	workspacePath: string,
@@ -431,20 +407,8 @@ export function getVectorSize(): number {
 }
 
 /**
-	* Извлекает messageTs из chunk_id произвольного формата.
-	*
-	* Поддерживаемые форматы:
-	* - `msg-{messageTs}-frag-{index}` — стандартный формат из messageRefactorer
-	* - Любой другой формат — возвращает null (chunk_id может быть произвольной строкой)
-	*
-	* @param chunkId - Идентификатор чанка (chunk_id из payload Qdrant)
-	* @returns Извлечённый messageTs (строка) или null, если формат не распознан
-	*
-	* @example
-	* extractTsFromChunkId("msg-1704067200000-frag-0") // "1704067200000"
-	* extractTsFromChunkId("msg-abc123-frag-2")         // "abc123"
-	* extractTsFromChunkId("custom-chunk-id")           // null
-	*/
+ * Извлекает messageTs из chunk_id произвольного формата.
+ */
 export function extractTsFromChunkId(chunkId: string): string | null {
 	if (!chunkId || typeof chunkId !== "string") return null
 
@@ -457,4 +421,85 @@ export function extractTsFromChunkId(chunkId: string): string | null {
 
 	// Если формат не распознан — chunk_id произвольный, ts не извлекается
 	return null
+}
+
+// ─── Workspace RAG Search ─────────────────────────────────────────────────────
+
+export interface WorkspaceSearchResult {
+	fragments: WorkspaceSearchFragment[]
+	count: number
+	error?: string
+}
+
+export interface WorkspaceSearchFragment {
+	filePath: string
+	startLine: number
+	endLine: number
+	codeChunk: string
+	score: number
+}
+
+export async function workspaceSearch(
+	query: string,
+	workspacePath: string,
+	limit: number = 5,
+	minScore: number = 0.3,
+): Promise<WorkspaceSearchResult> {
+	try {
+		if (!query || query.trim().length === 0) {
+			return { fragments: [], count: 0, error: "Empty query" }
+		}
+
+		if (!isQdrantConfigured()) {
+			return { fragments: [], count: 0, error: "Qdrant not configured" }
+		}
+
+		const qdrantConfig = getQdrantConfig()
+		const vectorSize = getVectorSize()
+
+		const { QdrantVectorStore } = await import("../../services/code-index/vector-store/qdrant-client")
+		const vectorStore = new QdrantVectorStore(workspacePath, qdrantConfig.url, vectorSize, qdrantConfig.apiKey)
+		await vectorStore.initialize()
+
+		const hasData = await vectorStore.hasIndexedData()
+		if (!hasData) {
+			return { fragments: [], count: 0, error: "Workspace not indexed yet" }
+		}
+
+		const apiKey = getEmbedderApiKey()
+		if (!apiKey) {
+			return { fragments: [], count: 0, error: "No embedder API key" }
+		}
+
+		const { OpenAICompatibleEmbedder } = await import("../../services/code-index/embedders/openai-compatible")
+		const embedderProvider = getEmbedderProvider()
+		const modelId = getEmbeddingModelId()
+		const baseUrl = getEmbedderBaseUrl(embedderProvider)
+		const embedder = new OpenAICompatibleEmbedder(baseUrl, apiKey, modelId || undefined)
+
+		const { embeddings } = await embedder.createEmbeddings([query])
+		const queryVector = embeddings[0]
+
+		if (!queryVector || queryVector.length === 0) {
+			return { fragments: [], count: 0, error: "Failed to create embedding" }
+		}
+
+		const searchResults = await vectorStore.search(queryVector, undefined, minScore, limit)
+
+		const fragments: WorkspaceSearchFragment[] = searchResults.map((r) => ({
+			filePath: r.payload?.filePath as string,
+			startLine: r.payload?.startLine as number,
+			endLine: r.payload?.endLine as number,
+			codeChunk: r.payload?.codeChunk as string,
+			score: r.score ?? 0,
+		}))
+
+		console.log(`[workspaceSearch] Found ${fragments.length} code fragments for query: "${query.substring(0, 80)}..."`)
+
+		return { fragments, count: fragments.length }
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.error(`[workspaceSearch] Failed: ${errorMessage}`)
+		return { fragments: [], count: 0, error: errorMessage }
+	}
 }
