@@ -78,9 +78,7 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 				const modelId = config.get<string>("embeddingModelId")
 				const openAiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
 				const baseUrl = config.get<string>("openAiCompatibleBaseUrl", "https://api.openai.com/v1")
-
-				// Use default vector size 1024 (common for text-embedding-3-small, Qwen3, etc.)
-				const vectorSize: number = 1024
+				const vectorSize = config.get<number>("embeddingModelDimension", 4096)
 
 				const vectorStore = new QdrantVectorStore(workspacePath, qdrantUrl, vectorSize, qdrantApiKey)
 				await vectorStore.initialize()

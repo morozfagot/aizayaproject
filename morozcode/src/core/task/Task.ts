@@ -642,7 +642,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	// Hybrid Relevance Pipeline
 
-
+	/**
+	 * Result from RRR (Retrieve-Refine-Retrieve) vector search enrichment.
+	 * Set in recursivelyMakeClineRequests() after successful RRR enrichment.
+	 * Used in attemptApiRequest() to report enrichedContext in pipeline logs.
+	 */
+	private _rrrResult: {
+		messages: ApiMessage[]
+		diagnostics: {
+			findChunksResult: string[]
+			extractedTsCount: number
+			reasonForEmpty?: string
+		}
+	} | undefined = undefined
 
 	// Pipeline Logger
 
@@ -967,12 +979,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 
 		// Normal use-case is usually retry similar history task with new workspace.
-
+		// Use nullish coalescing for workspacePath: if undefined/null, resolve from VS Code workspace.
+		// Also handle empty string case: if workspacePath is empty, resolve from VS Code workspace.
 		this.workspacePath = parentTask
-
 			? parentTask.workspacePath
-
-			: (workspacePath ?? getWorkspacePath(path.join(os.homedir(), "Desktop")))
+			: (workspacePath
+				? workspacePath
+				: getWorkspacePath(path.join(os.homedir(), "Desktop")))
 
 
 
@@ -5348,6 +5361,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 
 				// Hybrid Relevance Pipeline: Enrich context via Qdrant RRR before API request
+				// Reset RRR result from previous request
+				this._rrrResult = undefined
 
 				const userTextContent = currentUserContent
 
@@ -5358,6 +5373,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					.join("\n")
 
 
+
+				// Resolve embedder API key: provider settings > process.env > undefined
+				const embedderApiKey = this.apiConfiguration?.openRouterApiKey || this.apiConfiguration?.apiKey || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || undefined
+				console.log(`[Task#${this.taskId}] RRR debug: apiConfig=${!!this.apiConfiguration}, openRouterKey=${!!this.apiConfiguration?.openRouterApiKey}, apiKey=${!!this.apiConfiguration?.apiKey}, envKey=${!!process.env.OPENROUTER_API_KEY}, resolved=${!!embedderApiKey}, apiConfigKeys=${Object.keys(this.apiConfiguration || {}).join(',')}`)
 
 				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
 
@@ -5375,7 +5394,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 							0.0,
 
+							embedderApiKey,
+
 						)
+
+						// Save RRR result for pipeline logging
+						this._rrrResult = enrichmentResult
 
 						if (enrichmentResult.messages.length > 0) {
 
@@ -5405,28 +5429,57 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				// Workspace RAG Enrichment: search codebase for relevant code fragments
 				let workspaceContext = ""
-				if (userTextContent.trim().length > 0 && isQdrantConfigured() && this.cwd) {
+				const wsGuardText = userTextContent.trim().length > 0
+				const wsGuardQdrant = isQdrantConfigured()
+				const wsGuardCwd = !!this.cwd
+				const wsGuardPassed = wsGuardText && wsGuardQdrant && wsGuardCwd
+
+				if (wsGuardPassed) {
 					try {
+						const embedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
 						const wsResult = await workspaceSearch(
 							userTextContent,
 							this.cwd,
 							5,
 							0.3,
+							embedderApiKey,
+							embedderModelId,
 						)
 						if (wsResult.count > 0) {
 							const contextParts = wsResult.fragments.map((f, idx) =>
-								`[Code Fragment ${idx + 1}] File: ${f.filePath} (lines ${f.startLine}-${f.endLine}, score: ${f.score.toFixed(2)})\n\`\`\`\n${f.codeChunk}\n\`\`\``
+								`[Code Fragment ${idx + 1}] File: ${f.filePath} (lines ${f.startLine}-${f.endLine}, score: ${f.score.toFixed(2)})\n\`\`\`\n${f.codeChunk}\n\`\`\``,
 							)
 							workspaceContext = `\n\n## Relevant Code from Workspace\nThe following code fragments are semantically related to the user's request:\n\n${contextParts.join("\n\n")}\n`
-							console.log(
-								`[Task#${this.taskId}] Workspace enrichment: ${wsResult.count} code fragments found`,
-							)
-						} else if (wsResult.error) {
-							console.warn(`[Task#${this.taskId}] Workspace search: ${wsResult.error}`)
 						}
+						await this.pipelineLogger.logStep("ws", "success", {
+							wsResultCount: wsResult.count,
+							wsError: wsResult.error || null,
+							embedderModelId: embedderModelId || "undefined",
+						}, {
+							originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}`,
+							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}`,
+							modelUsed: "workspace-search",
+						})
 					} catch (error) {
-						console.warn(`[Task#${this.taskId}] Workspace enrichment failed:`, error)
+						await this.pipelineLogger.logStep("ws", "error", {
+							error: error instanceof Error ? error.message : String(error),
+						}, {
+							originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}`,
+							originalResponse: `WS failed: ${error instanceof Error ? error.message : String(error)}`,
+							modelUsed: "workspace-search",
+						})
 					}
+				} else {
+					await this.pipelineLogger.logStep("ws", "skipped", {
+						wsGuardText,
+						wsGuardQdrant,
+						wsGuardCwd,
+						skipReason: !wsGuardText ? "empty-text" : !wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : "unknown",
+					}, {
+						originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}`,
+						originalResponse: `WS skipped: ${!wsGuardText ? "empty-text" : !wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : "unknown"}`,
+						modelUsed: "workspace-search",
+					})
 				}
 
 				// Dynamic Model Selection:
@@ -8657,63 +8710,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		let effectiveHistory: ApiMessage[]
 
-		let enrichedContext = false
-
-		let tagMatchDetails: Record<string, number> = {}
-
-		let rrrDiagnostics: { findChunksResult: string[]; extractedTsCount: number; reasonForEmpty?: string } | undefined
-
-		if (isQdrantConfigured()) {
-
-			this.pipelineLogger.startStep()
-
-			const vectorSearchResult = await getEffectiveApiHistoryWithVectorSearch(
-
-				this.apiConversationHistory,
-
-				this.getLastUserMessageText(),
-
-				this.taskId,
-
-				this.globalStoragePath,
-
-				0.7,
-
-			)
-
-			rrrDiagnostics = vectorSearchResult.diagnostics
-
-			// Fallback: vector-filter must not zero out context
-
-			if (vectorSearchResult.messages.length > 0) {
-
-				effectiveHistory = vectorSearchResult.messages
-
-				enrichedContext = true
-
-				console.log(
-
-					`[Task#${this.taskId}] Using vector-filtered history: ${effectiveHistory.length} messages (RRR via Qdrant)`,
-
-				)
-
-			} else {
-
-				console.warn(
-
-					`[Task#${this.taskId}] Vector-filtered history is empty, falling back to standard history`,
-
-				)
-
-				effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
-
-			}
-
-		} else {
-
-			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
-
-		}
+		// RRR enrichment is done in recursivelyMakeClineRequests() before API request.
+		// Here we just use standard effective history filtering (condense/truncate).
+		const rrrDiagnostics = this._rrrResult?.diagnostics
+		const enrichedContext = !!(this._rrrResult && this._rrrResult.messages.length > 0)
+		const tagMatchDetails: Record<string, number> = {}
+		effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 
 
 

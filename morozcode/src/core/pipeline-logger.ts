@@ -11,8 +11,8 @@ export interface PipelineLogEntry {
 	pluginVersion: string
 	timestamp: string
 	taskId: string
-	step: 1 | 2 | 3 | 4 | 5 | 6
-	status: "success" | "fallback" | "error" | "error-fatal"
+	step: 1 | 2 | 3 | 4 | 5 | 6 | string
+	status: "success" | "fallback" | "error" | "error-fatal" | "skipped"
 	durationMs: number
 	details: Record<string, unknown>
 	/** Полный текст запроса (user prompt) для метасознания */
@@ -37,6 +37,7 @@ export class PipelineLogger {
 	private readonly logDir: string
 	private readonly taskId: string
 	private currentStepStart: number = 0
+	private pluginVersion: string
 
 	constructor(taskId: string, logDir: string, pluginVersion: string) {
 		this.taskId = taskId
@@ -53,14 +54,14 @@ export class PipelineLogger {
 
 	/**
 	 * Записать лог шага.
-	 * @param step - Номер шага (1-6)
+	 * @param step - Номер шага (1-6) или строковый идентификатор для кастомных шагов
 	 * @param status - Статус выполнения
 	 * @param details - Детали шага (метаданные)
 	 * @param meta - Метаданные для метасознания (опционально)
 	 */
 	async logStep(
-		step: 1 | 2 | 3 | 4 | 5 | 6,
-		status: "success" | "fallback" | "error" | "error-fatal",
+		step: 1 | 2 | 3 | 4 | 5 | 6 | string,
+		status: "success" | "fallback" | "error" | "error-fatal" | "skipped",
 		details: Record<string, unknown>,
 		meta?: {
 			originalRequest?: string
@@ -72,14 +73,13 @@ export class PipelineLogger {
 		},
 	): Promise<void> {
 		const durationMs = Date.now() - this.currentStepStart
-		// Дублируем originalRequest/originalResponse в details для метасознания
-		// (модель-анализатор читает details, а не корневой уровень)
 		const detailsWithText: Record<string, unknown> = {
 			...details,
 			...(meta?.originalRequest !== undefined ? { originalRequest: meta.originalRequest } : {}),
 			...(meta?.originalResponse !== undefined ? { originalResponse: meta.originalResponse } : {}),
 		}
 		const entry: PipelineLogEntry = {
+			pluginVersion: this.pluginVersion,
 			timestamp: new Date().toISOString(),
 			taskId: this.taskId,
 			step,
@@ -101,11 +101,10 @@ export class PipelineLogger {
 	 */
 	private async appendLog(entry: PipelineLogEntry): Promise<void> {
 		try {
-			const date = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+			const date = new Date().toISOString().slice(0, 10)
 			const fileName = `pipeline-${this.taskId}-${date}.jsonl`
 			const filePath = path.join(this.logDir, fileName)
 
-			// Создаём директорию если не существует
 			if (!fs.existsSync(this.logDir)) {
 				fs.mkdirSync(this.logDir, { recursive: true })
 			}
@@ -113,7 +112,6 @@ export class PipelineLogger {
 			const line = JSON.stringify(entry) + "\n"
 			fs.appendFileSync(filePath, line, "utf8")
 		} catch (error) {
-			// Логгер не должен ломать основной поток
 			console.error(`[PipelineLogger] Failed to write log: ${error instanceof Error ? error.message : String(error)}`)
 		}
 	}

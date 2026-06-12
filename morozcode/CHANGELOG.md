@@ -1,5 +1,63 @@
 # Morozcode Changelog
 
+## 2.3.8
+
+### Bug Fixes
+
+- **Fix workspace enrichment not triggering — `this.cwd` undefined and `getEmbeddingModelId()` returning undefined**: Root cause was twofold: (1) `workspacePath` could be empty string when `options.workspacePath` was not provided — empty string is not nullish so `??` fallback to `getWorkspacePath()` never triggered, and empty string is falsy so `this.cwd` guard blocked `workspaceSearch()`; (2) `getEmbeddingModelId()` in `sessionQdrant.ts` read from VS Code settings.json (`roo-code.codebaseIndex.embeddingModelId`) but user configured model through webview UI which stores in globalState (`codebaseIndexConfig.codebaseIndexEmbedderModelId`) — two completely different storage backends. Fixed by: using truthy check instead of nullish coalescing for `workspacePath` initialization in `Task.ts`; adding `getCodebaseIndexEmbedderModelId()` method to `ClineProvider` that reads from globalState; passing `embedderModelId` as explicit parameter to `workspaceSearch()` from `Task.ts`; adding clear error message in `workspaceSearch()` when modelId is not configured. No fallback default model — user must explicitly configure embedding model. ([`Task.ts:983`](AiZayaProject/morozcode/src/core/task/Task.ts#L983), [`ClineProvider.ts:3122`](AiZayaProject/morozcode/src/core/webview/ClineProvider.ts#L3122), [`sessionQdrant.ts:484`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L484))
+
+## 2.3.7
+
+### Bug Fixes
+
+- **Fix OpenRouterEmbedder.validateConfiguration empty modelId**: Added early validation check for empty/undefined `defaultModelId` before making API request — returns clear `embeddings:validation.modelIdRequired` error instead of cryptic `invalidResponse` ([`openrouter.ts:300-307`](AiZayaProject/morozcode/src/services/code-index/embedders/openrouter.ts#L300))
+
+## 2.3.6
+
+### Bug Fixes
+
+- **Fix workspace enrichment infinite reindex loop**: QdrantVectorStore.initialize() no longer deletes existing collection when vector dimension mismatches — instead creates a new collection with dimension suffix (e.g. `ws-hash-4096`), preserving old collections for model switching scenarios ([`qdrant-client.ts:195-220`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L195))
+- **Remove hardcoded fallback 1536 for modelDimension**: ClineProvider.ts no longer defaults `codebaseIndexEmbedderModelDimension` to 1536 when not configured — prevents silent dimension mismatch when user selects 4096 model in UI ([`ClineProvider.ts:2246`](AiZayaProject/morozcode/src/core/webview/ClineProvider.ts#L2246))
+- **Remove hardcoded fallback to text-embedding-3-small**: sessionQdrant.ts getVectorSize() and getEmbedderFromCodeIndex() now throw explicit errors instead of silently falling back to 1536-dimension model when embedding model ID is not configured ([`sessionQdrant.ts:402`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L402), [`sessionQdrant.ts:107`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L107))
+
+## 2.3.5
+
+### Bug Fixes
+
+- **Fix RRR enrichment API key resolution**: Added fallback to `process.env.OPENROUTER_API_KEY` and `process.env.OPENAI_API_KEY` in Task.ts embedderApiKey resolution — fixes `No embedder API key available` errors ([`Task.ts:5377`](AiZayaProject/morozcode/src/core/task/Task.ts#L5377))
+
+## 2.3.4
+
+### Bug Fixes
+
+- **Fix embedder API key resolution**: Added fallback to `process.env.OPENROUTER_API_KEY` and `process.env.OPENAI_API_KEY` when `apiConfiguration.openRouterApiKey` is not set — fixes `enrichedContext: false` / `No embedder API key available` in all pipeline logs ([`Task.ts:5377`](AiZayaProject/morozcode/src/core/task/Task.ts#L5377))
+
+## 2.3.3
+
+### Bug Fixes
+
+- **Add diagnostic logging for API key resolution**: Added `apiConfigKeys` to RRR debug log to help diagnose missing `openRouterApiKey` in `apiConfiguration` ([`Task.ts:5378`](AiZayaProject/morozcode/src/core/task/Task.ts#L5378))
+
+## 2.3.2
+
+### Bug Fixes
+
+- **Fix `enrichedContext: false` in pipeline logs**: RRR result now stored in `this._rrrResult` field and used to compute `enrichedContext` and `rrrDiagnostics` in pipeline logger — previously these were hardcoded as `false`/`undefined` regardless of actual RRR enrichment outcome ([`Task.ts:650`](AiZayaProject/morozcode/src/core/task/Task.ts#L650), [`Task.ts:8684`](AiZayaProject/morozcode/src/core/task/Task.ts#L8684))
+
+## 2.3.0
+
+### Bug Fixes
+
+- **Fix RRR enrichment API key resolution**: `getEffectiveApiHistoryWithVectorSearch()` and `workspaceSearch()` now accept `embedderApiKey` parameter from `Task.ts` (`this.apiConfiguration.openRouterApiKey`) instead of only checking `process.env` and VS Code config — fixes `enrichedContext: false` / `No embedder API key available` in all pipeline logs ([`sessionQdrant.ts:446`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L446), [`condense/index.ts:728`](AiZayaProject/morozcode/src/core/condense/index.ts#L728), [`Task.ts:5362`](AiZayaProject/morozcode/src/core/task/Task.ts#L5362))
+- **Remove duplicate RRR call in `getApiHistory()`**: vector search enrichment now only happens in `recursivelyMakeClineRequests()` (threshold 0.0), not twice — eliminates redundant Qdrant queries and potential context filtering issues ([`Task.ts:8664`](AiZayaProject/morozcode/src/core/task/Task.ts#L8664))
+- **Add diagnostic logging to `getEmbedderApiKey()`**: logs which source provided the API key (env vars vs VS Code config) or warns if not found — helps debug key resolution issues ([`sessionQdrant.ts:20`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L20))
+
+## 2.2.0
+
+### Features
+
+- **Workspace RAG enrichment**: `workspaceSearch()` function added to search codebase via Qdrant before API request — injects relevant code fragments into system prompt ([`sessionQdrant.ts:446`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L446))
+
 ## 1.6.0
 
 ### Features

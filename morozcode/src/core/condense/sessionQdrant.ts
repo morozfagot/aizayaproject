@@ -18,27 +18,31 @@ const SESSION_COLLECTION_PREFIX = "session_"
  * Priority: env vars > VS Code config.
  */
 export function getEmbedderApiKey(): string | undefined {
-	// Priority 1: Environment variables
+	// Priority 1: Environment variables (loaded from .env by extension.ts via dotenvx)
 	const envKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY
 	if (envKey && envKey.trim().length > 0) {
+		console.log(`[sessionQdrant] API key found in process.env (${envKey.substring(0, 8)}...)`)
 		return envKey.trim()
 	}
 
-	// Priority 2: VS Code configuration
+	// Priority 2: VS Code configuration (roo-code.codebaseIndex)
 	try {
 		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
 		const openAiKey = config.get<string>("openAiKey")
 		if (openAiKey && openAiKey.trim().length > 0) {
+			console.log(`[sessionQdrant] API key found in VS Code config (openAiKey, ${openAiKey.substring(0, 8)}...)`)
 			return openAiKey.trim()
 		}
 		const openRouterKey = config.get<string>("openRouterKey", "")
 		if (openRouterKey && openRouterKey.trim().length > 0) {
+			console.log(`[sessionQdrant] API key found in VS Code config (openRouterKey, ${openRouterKey.substring(0, 8)}...)`)
 			return openRouterKey.trim()
 		}
 	} catch {
 		// VS Code API not available
 	}
 
+	console.warn("[sessionQdrant] No embedder API key found in process.env or VS Code config. RRR enrichment will be skipped.")
 	return undefined
 }
 
@@ -100,9 +104,13 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 		// Try to get vector size from config
 		const embedderProvider = getEmbedderProvider()
 		const modelId = getEmbeddingModelId()
-		const dimension = modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider, "text-embedding-3-small")
+		if (!modelId) {
+			console.warn(`[sessionQdrant] No embedding model ID configured. Set roo-code.codebaseIndex.embeddingModelId or EMBEDDING_MODEL_ID.`)
+			return null
+		}
+		const dimension = getModelDimension(embedderProvider, modelId)
 		if (!dimension) {
-			console.warn(`[sessionQdrant] Could not determine vector dimension for provider=${embedderProvider}, modelId=${modelId}, falling back to 1024`)
+			console.warn(`[sessionQdrant] Cannot determine vector dimension for provider=${embedderProvider}, modelId=${modelId}. Set roo-code.codebaseIndex.embeddingModelDimension manually.`)
 			return null
 		}
 
@@ -396,14 +404,22 @@ export function getQdrantConfig(): { url: string; apiKey?: string } {
  * Get embedding vector dimension from VS Code settings.
  */
 export function getVectorSize(): number {
-	try {
-		const embedderProvider = getEmbedderProvider()
-		const modelId = getEmbeddingModelId()
-		const dimension = modelId ? getModelDimension(embedderProvider, modelId) : getModelDimension(embedderProvider, "text-embedding-3-small")
-		return dimension ?? 1024 // fallback default
-	} catch {
-		return 1024 // fallback default
+	const embedderProvider = getEmbedderProvider()
+	const modelId = getEmbeddingModelId()
+	if (!modelId) {
+		throw new Error(
+			`[sessionQdrant] No embedding model ID configured. ` +
+			`Please set roo-code.codebaseIndex.embeddingModelId in VS Code settings or EMBEDDING_MODEL_ID environment variable.`
+		)
 	}
+	const dimension = getModelDimension(embedderProvider, modelId)
+	if (!dimension) {
+		throw new Error(
+			`[sessionQdrant] Cannot determine vector dimension for provider="${embedderProvider}", modelId="${modelId}". ` +
+			`Please check that the model is supported or set roo-code.codebaseIndex.embeddingModelDimension manually.`
+		)
+	}
+	return dimension
 }
 
 /**
@@ -444,6 +460,8 @@ export async function workspaceSearch(
 	workspacePath: string,
 	limit: number = 5,
 	minScore: number = 0.3,
+	embedderApiKey?: string,
+	embedderModelId?: string,
 ): Promise<WorkspaceSearchResult> {
 	try {
 		if (!query || query.trim().length === 0) {
@@ -455,7 +473,37 @@ export async function workspaceSearch(
 		}
 
 		const qdrantConfig = getQdrantConfig()
-		const vectorSize = getVectorSize()
+
+		// Use provided key first, fallback to config/env resolution
+		const apiKey = embedderApiKey || getEmbedderApiKey()
+		if (!apiKey) {
+			return { fragments: [], count: 0, error: "No embedder API key" }
+		}
+
+		const { OpenAICompatibleEmbedder } = await import("../../services/code-index/embedders/openai-compatible")
+		const embedderProvider = getEmbedderProvider()
+		// Use provided modelId first, then fallback to config/env resolution
+		const modelId = embedderModelId || getEmbeddingModelId()
+		if (!modelId) {
+			return {
+				fragments: [],
+				count: 0,
+				error: "No embedding model ID configured. Set the embedding model in Roo Code settings (Code Indexing → Embedding Model) or set EMBEDDING_MODEL_ID environment variable."
+			}
+		}
+		const baseUrl = getEmbedderBaseUrl(embedderProvider)
+		const embedder = new OpenAICompatibleEmbedder(baseUrl, apiKey, modelId)
+
+		// Create embedding first to determine actual vector dimension
+		const { embeddings } = await embedder.createEmbeddings([query])
+		const queryVector = embeddings[0]
+
+		if (!queryVector || queryVector.length === 0) {
+			return { fragments: [], count: 0, error: "Failed to create embedding" }
+		}
+
+		// Use actual embedding dimension (not config-based) to match Qdrant collection
+		const vectorSize = queryVector.length
 
 		const { QdrantVectorStore } = await import("../../services/code-index/vector-store/qdrant-client")
 		const vectorStore = new QdrantVectorStore(workspacePath, qdrantConfig.url, vectorSize, qdrantConfig.apiKey)
@@ -464,24 +512,6 @@ export async function workspaceSearch(
 		const hasData = await vectorStore.hasIndexedData()
 		if (!hasData) {
 			return { fragments: [], count: 0, error: "Workspace not indexed yet" }
-		}
-
-		const apiKey = getEmbedderApiKey()
-		if (!apiKey) {
-			return { fragments: [], count: 0, error: "No embedder API key" }
-		}
-
-		const { OpenAICompatibleEmbedder } = await import("../../services/code-index/embedders/openai-compatible")
-		const embedderProvider = getEmbedderProvider()
-		const modelId = getEmbeddingModelId()
-		const baseUrl = getEmbedderBaseUrl(embedderProvider)
-		const embedder = new OpenAICompatibleEmbedder(baseUrl, apiKey, modelId || undefined)
-
-		const { embeddings } = await embedder.createEmbeddings([query])
-		const queryVector = embeddings[0]
-
-		if (!queryVector || queryVector.length === 0) {
-			return { fragments: [], count: 0, error: "Failed to create embedding" }
 		}
 
 		const searchResults = await vectorStore.search(queryVector, undefined, minScore, limit)

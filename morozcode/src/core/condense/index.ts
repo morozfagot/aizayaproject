@@ -731,6 +731,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	taskId: string,
 	globalStoragePath: string,
 	threshold: number = 0.0,
+	embedderApiKey?: string,
 ): Promise<{
 	messages: ApiMessage[];
 	diagnostics: {
@@ -768,8 +769,10 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		const qdrantConfig = getQdrantConfig()
 		const vectorSize = getVectorSize()
 
-		// Get embedder using unified key resolution (env vars > VS Code config)
-		const apiKey = getEmbedderApiKey()
+		// Get embedder key: use provided key first, fallback to config/env resolution
+		console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
+		const apiKey = embedderApiKey || getEmbedderApiKey()
+		console.log(`[getEffectiveApiHistoryWithVectorSearch] resolved apiKey: ${!!apiKey}, length: ${apiKey?.length ?? 0}`)
 		if (!apiKey) {
 			return {
 				messages: [],
