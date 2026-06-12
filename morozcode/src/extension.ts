@@ -8,13 +8,17 @@ import * as path from "path"
 // Avoid calling dotenvx when the file doesn't exist, otherwise dotenvx emits
 // a noisy [MISSING_ENV_FILE] error to the extension host console.
 const envPath = path.join(__dirname, "..", ".env")
+console.log(`[Extension] Checking .env at: ${envPath}, exists: ${fs.existsSync(envPath)}`)
 if (fs.existsSync(envPath)) {
 	try {
 		dotenvx.config({ path: envPath })
+		console.log(`[Extension] .env loaded, OPENROUTER_API_KEY: ${process.env.OPENROUTER_API_KEY ? "SET (" + process.env.OPENROUTER_API_KEY.substring(0, 8) + "...)" : "NOT SET"}`)
 	} catch (e) {
 		// Best-effort only: never fail extension activation due to optional env loading.
 		console.warn("Failed to load environment variables:", e)
 	}
+} else {
+	console.warn("[Extension] .env file not found, RRR enrichment will not work")
 }
 
 import type { CloudUserInfo, AuthState } from "@roo-code/types"

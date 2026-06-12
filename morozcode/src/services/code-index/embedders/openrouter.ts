@@ -85,7 +85,12 @@ export class OpenRouterEmbedder implements IEmbedder {
 			throw handleOpenAIError(error, "OpenRouter")
 		}
 
-		this.defaultModelId = modelId || getDefaultModelId("openrouter")
+		if (!modelId) {
+			throw new Error(
+				`[OpenRouterEmbedder] No model ID provided. Please set roo-code.codebaseIndex.embeddingModelId in VS Code settings.`
+			)
+		}
+		this.defaultModelId = modelId
 		this.maxItemTokens = maxItemTokens || MAX_ITEM_TOKENS
 	}
 
@@ -292,6 +297,15 @@ export class OpenRouterEmbedder implements IEmbedder {
 	async validateConfiguration(): Promise<{ valid: boolean; error?: string }> {
 		return withValidationErrorHandling(async () => {
 			try {
+				// Validate modelId is set before making API call
+				if (!this.defaultModelId) {
+					console.error(`[OpenRouterEmbedder] validateConfiguration: modelId is empty or undefined`)
+					return {
+						valid: false,
+						error: "embeddings:validation.modelIdRequired",
+					}
+				}
+
 				// Test with a minimal embedding request
 				const testTexts = ["test"]
 				const modelToUse = this.defaultModelId
@@ -312,12 +326,19 @@ export class OpenRouterEmbedder implements IEmbedder {
 					}
 				}
 
+				console.log(`[OpenRouterEmbedder] validateConfiguration: model=${modelToUse}, sending request...`)
 				const response = (await this.embeddingsClient.embeddings.create(
 					requestParams,
 				)) as OpenRouterEmbeddingResponse
-
+	
+				console.log(`[OpenRouterEmbedder] validateConfiguration: response received, data length=${response?.data?.length}, has data=${!!response?.data}`)
+				if (response?.data) {
+					console.log(`[OpenRouterEmbedder] validateConfiguration: first item keys=${Object.keys(response.data[0] || {}).join(', ')}`)
+				}
+	
 				// Check if we got a valid response
 				if (!response?.data || response.data.length === 0) {
+					console.error(`[OpenRouterEmbedder] validateConfiguration: INVALID RESPONSE - data is empty or missing`)
 					return {
 						valid: false,
 						error: "embeddings:validation.invalidResponse",

@@ -15,7 +15,7 @@ export class QdrantVectorStore implements IVectorStore {
 	private readonly DISTANCE_METRIC = "Cosine"
 
 	private client: QdrantClient
-	private readonly collectionName: string
+	private collectionName: string
 	private readonly qdrantUrl: string = "http://localhost:6333"
 	private readonly workspacePath: string
 
@@ -132,13 +132,19 @@ export class QdrantVectorStore implements IVectorStore {
 			const collectionInfo = await this.client.getCollection(this.collectionName)
 			return collectionInfo
 		} catch (error: unknown) {
-			if (error instanceof Error) {
-				console.warn(
-					`[QdrantVectorStore] Warning during getCollectionInfo for "${this.collectionName}". Collection may not exist or another error occurred:`,
-					error.message,
-				)
+			// Collection not found (404) is expected — return null to trigger creation
+			const status = (error as any)?.status
+			const message = error instanceof Error ? error.message : ""
+			if (status === 404 || message.includes("Not found") || message.includes("404")) {
+				return null
 			}
-			return null
+			// Any other error (network, timeout, auth) — log and re-throw
+			// to prevent creating duplicate collections when Qdrant is temporarily unavailable
+			console.error(
+				`[QdrantVectorStore] Error checking collection "${this.collectionName}" (not a 404):`,
+				message || error,
+			)
+			throw error
 		}
 	}
 
@@ -187,8 +193,31 @@ export class QdrantVectorStore implements IVectorStore {
 				if (existingVectorSize === this.vectorSize) {
 					created = false // Exists and correct
 				} else {
-					// Exists but wrong vector size, recreate with enhanced error handling
-					created = await this._recreateCollectionWithNewDimension(existingVectorSize)
+					// Collection exists with different dimension — do NOT delete it.
+					// Create a new collection with a dimension-specific suffix so both
+					// old and new collections can coexist (supports model switching).
+					console.warn(
+						`[QdrantVectorStore] Collection "${this.collectionName}" exists with vector size ${existingVectorSize}, but expected ${this.vectorSize}. Creating new collection with dimension suffix.`,
+					)
+					const baseName = this.collectionName
+					this.collectionName = `${baseName}-${this.vectorSize}`
+					// Check if the dimension-specific collection already exists
+					const dimCollectionInfo = await this.getCollectionInfo()
+					if (dimCollectionInfo === null) {
+						await this.client.createCollection(this.collectionName, {
+							vectors: {
+								size: this.vectorSize,
+								distance: this.DISTANCE_METRIC,
+								on_disk: true,
+							},
+							hnsw_config: {
+								m: 64,
+								ef_construct: 512,
+								on_disk: true,
+							},
+						})
+					}
+					created = true
 				}
 			}
 

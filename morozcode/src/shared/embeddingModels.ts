@@ -183,9 +183,11 @@ export function getDefaultModelId(provider: EmbedderProvider): string {
 		case "bedrock":
 			return "amazon.titan-embed-text-v2:0"
 		case "openrouter":
-			return "openai/text-embedding-3-large"
-
-		default:
+				// No default — model must be explicitly configured by the user.
+				// Return undefined so callers know there's no fallback.
+				return undefined as any
+	
+			default:
 			// Fallback for unknown providers
 			console.warn(`Unknown provider for default model ID: ${provider}. Falling back to OpenAI default.`)
 			return "text-embedding-3-small"
