@@ -4830,10 +4830,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			const currentIncludeFileDetails = currentItem.includeFileDetails
 
-
+			// Workspace context from vector search (filled later in the loop)
+			let workspaceContext = ""
 
 			if (this.abort) {
-
 				throw new Error(`[RooCode#recursivelyMakeRooRequests] task ${this.taskId}.${this.instanceId} aborted`)
 
 			}
@@ -5081,6 +5081,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// results.
 
 			let finalUserContent = [...contentWithoutEnvDetails, { type: "text" as const, text: environmentDetails }]
+			if (workspaceContext && workspaceContext.trim().length > 0) {
+				finalUserContent.push({ type: "text" as const, text: workspaceContext })
+			}
 
 			// Only add user message to conversation history if:
 
@@ -5428,17 +5431,34 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				}
 
 				// Workspace RAG Enrichment: search codebase for relevant code fragments
-				let workspaceContext = ""
-				const wsGuardText = userTextContent.trim().length > 0
+				this.pipelineLogger.startStep()
+				workspaceContext = ""
 				const wsGuardQdrant = isQdrantConfigured()
 				const wsGuardCwd = !!this.cwd
-				const wsGuardPassed = wsGuardText && wsGuardQdrant && wsGuardCwd
-
+	
+				// Build search query: use userTextContent if available, otherwise fallback to last message + system prompt
+				let wsSearchQuery = userTextContent.trim()
+				if (wsSearchQuery.length === 0) {
+					// Fallback: use last user message from conversation history
+					const lastUserMsg = [...(this.apiConversationHistory || [])].reverse().find(m => m.role === "user")
+					if (lastUserMsg && typeof lastUserMsg.content === "string") {
+						wsSearchQuery = lastUserMsg.content.substring(0, 500)
+					} else if (lastUserMsg && Array.isArray(lastUserMsg.content)) {
+						wsSearchQuery = lastUserMsg.content
+							.filter((b: any) => b.type === "text")
+							.map((b: any) => b.text)
+							.join("\n")
+							.substring(0, 500)
+					}
+				}
+	
+				const wsGuardPassed = wsGuardQdrant && wsGuardCwd && wsSearchQuery.length > 0
+	
 				if (wsGuardPassed) {
 					try {
 						const embedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
 						const wsResult = await workspaceSearch(
-							userTextContent,
+							wsSearchQuery,
 							this.cwd,
 							5,
 							0.3,
@@ -5451,33 +5471,42 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							)
 							workspaceContext = `\n\n## Relevant Code from Workspace\nThe following code fragments are semantically related to the user's request:\n\n${contextParts.join("\n\n")}\n`
 						}
+						// Build flat, model-readable fragment text for Redis storage
+						const fragmentTexts = wsResult.fragments.map((f, idx) =>
+							`[Fragment ${idx + 1}] file=${f.filePath} lines=${f.startLine}-${f.endLine} score=${f.score.toFixed(3)}\n${f.codeChunk}`
+						)
+						const fullFragmentText = fragmentTexts.join("\n\n---\n\n")
 						await this.pipelineLogger.logStep("ws", "success", {
 							wsResultCount: wsResult.count,
 							wsError: wsResult.error || null,
 							embedderModelId: embedderModelId || "undefined",
+							usedFallback: userTextContent.trim().length === 0,
+							wsSearchQuery: wsSearchQuery.substring(0, 200),
+							wsFragmentFiles: wsResult.fragments.map(f => f.filePath),
+							wsFragmentScores: wsResult.fragments.map(f => f.score),
 						}, {
-							originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}`,
-							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}`,
+							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}`,
+							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}\n\n${fullFragmentText}`,
 							modelUsed: "workspace-search",
 						})
 					} catch (error) {
 						await this.pipelineLogger.logStep("ws", "error", {
 							error: error instanceof Error ? error.message : String(error),
 						}, {
-							originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}`,
+							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}`,
 							originalResponse: `WS failed: ${error instanceof Error ? error.message : String(error)}`,
 							modelUsed: "workspace-search",
 						})
 					}
 				} else {
 					await this.pipelineLogger.logStep("ws", "skipped", {
-						wsGuardText,
 						wsGuardQdrant,
 						wsGuardCwd,
-						skipReason: !wsGuardText ? "empty-text" : !wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : "unknown",
+						wsSearchQueryLen: wsSearchQuery.length,
+						skipReason: !wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : wsSearchQuery.length === 0 ? "empty-query" : "unknown",
 					}, {
-						originalRequest: `WS: text=${wsGuardText}, qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}`,
-						originalResponse: `WS skipped: ${!wsGuardText ? "empty-text" : !wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : "unknown"}`,
+						originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, queryLen=${wsSearchQuery.length}`,
+						originalResponse: `WS skipped: ${!wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : wsSearchQuery.length === 0 ? "empty-query" : "unknown"}`,
 						modelUsed: "workspace-search",
 					})
 				}

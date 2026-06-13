@@ -45,26 +45,6 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 		details += `\n${allowedVisibleFiles}`
 	}
 
-	const { maxOpenTabsContext } = state ?? {}
-	const maxTabs = maxOpenTabsContext ?? 20
-	const openTabPaths = vscode.window.tabGroups.all
-		.flatMap((group) => group.tabs)
-		.filter((tab) => tab.input instanceof vscode.TabInputText)
-		.map((tab) => (tab.input as vscode.TabInputText).uri.fsPath)
-		.filter(Boolean)
-		.map((absolutePath) => path.relative(cline.cwd, absolutePath).toPosix())
-		.slice(0, maxTabs)
-
-	// Filter paths through rooIgnoreController
-	const allowedOpenTabs = cline.rooIgnoreController
-		? cline.rooIgnoreController.filterPaths(openTabPaths)
-		: openTabPaths.map((p) => p.toPosix()).join("\n")
-
-	if (allowedOpenTabs) {
-		details += "\n\n# VSCode Open Tabs"
-		details += `\n${allowedOpenTabs}`
-	}
-
 	// Get task-specific and background terminals.
 	const busyTerminals = [
 		...TerminalRegistry.getTerminals(true, cline.taskId),

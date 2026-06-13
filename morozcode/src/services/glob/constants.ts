@@ -22,4 +22,5 @@ export const DIRS_TO_IGNORE = [
 	"Pods",
 	".git",
 	".*",
+	"qdrant_data",
 ]
