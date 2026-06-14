@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.1
+
+### Bug Fixes
+
+- **Fix WS context not being injected into model context**: WS search found fragments but they were never added to the API request. Root cause: `workspaceContext` was added to `finalUserContent` at line 5084, but WS search happened much later at line 5485 — so `workspaceContext` was always empty when user content was built. Fixed by injecting WS context into the last user message in `apiConversationHistory` after WS search completes. Added `_workspaceContext` field to Task class to track WS state across methods. Updated `enrichedContext` flag to be `true` when WS context is present, even without RRR enrichment. ([`Task.ts:5547`](AiZayaProject/morozcode/src/core/task/Task.ts#L5547))
+
 ## 2.4.0
 
 ### Features

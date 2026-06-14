@@ -656,6 +656,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	} | undefined = undefined
 
+	/**
+	 * Workspace context from vector search enrichment.
+	 * Set in recursivelyMakeClineRequests() after successful WS search.
+	 * Used in attemptApiRequest() to report enrichedContext in pipeline logs.
+	 */
+	private _workspaceContext: string = ""
+
 	// Pipeline Logger
 
 	private pipelineLogger: PipelineLogger
@@ -5438,7 +5445,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				// Workspace RAG Enrichment: search codebase for relevant code fragments
 				this.pipelineLogger.startStep()
-				workspaceContext = ""
+				this._workspaceContext = ""
 				const wsGuardQdrant = isQdrantConfigured()
 				const wsGuardCwd = !!this.cwd
 
@@ -5494,7 +5501,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							const contextParts = wsResult.fragments.map((f, idx) =>
 								`[Code Fragment ${idx + 1}] File: ${f.filePath} (lines ${f.startLine}-${f.endLine}, score: ${f.score.toFixed(2)})\n\`\`\`\n${f.codeChunk}\n\`\`\``,
 							)
-							workspaceContext = `\n\n## Relevant Code from Workspace\nThe following code fragments are semantically related to the user's request:\n\n${contextParts.join("\n\n")}\n`
+							this._workspaceContext = `\n\n## Relevant Code from Workspace\nThe following code fragments are semantically related to the user's request:\n\n${contextParts.join("\n\n")}\n`
 						}
 						// Build flat, model-readable fragment text for Redis storage
 						const fragmentTexts = wsResult.fragments.map((f, idx) =>
@@ -5535,6 +5542,26 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						originalResponse: `WS skipped: ${!wsGuardQdrant ? "qdrant-not-configured" : !wsGuardCwd ? "cwd-empty" : wsSearchQuery.length === 0 ? "empty-query" : "unknown"}`,
 						modelUsed: "workspace-search",
 					})
+				}
+
+				// Inject workspace context into the last user message in conversation history
+				if (this._workspaceContext && this._workspaceContext.trim().length > 0) {
+					let lastUserMsgIdx = -1
+					for (let i = this.apiConversationHistory.length - 1; i >= 0; i--) {
+						if (this.apiConversationHistory[i].role === "user") {
+							lastUserMsgIdx = i
+							break
+						}
+					}
+					if (lastUserMsgIdx >= 0) {
+						const lastUserMsg = this.apiConversationHistory[lastUserMsgIdx]
+						if (typeof lastUserMsg.content === "string") {
+							lastUserMsg.content += this._workspaceContext
+						} else if (Array.isArray(lastUserMsg.content)) {
+							;(lastUserMsg.content as Array<{type: string; text?: string}>).push({ type: "text", text: this._workspaceContext })
+						}
+						console.log(`[Task#${this.taskId}] Injected WS context into user message: ${this._workspaceContext.length} chars`)
+					}
 				}
 
 				// Dynamic Model Selection:
@@ -8768,7 +8795,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// RRR enrichment is done in recursivelyMakeClineRequests() before API request.
 		// Here we just use standard effective history filtering (condense/truncate).
 		const rrrDiagnostics = this._rrrResult?.diagnostics
-		const enrichedContext = !!(this._rrrResult && this._rrrResult.messages.length > 0)
+		const hasWorkspaceContext = !!(this._workspaceContext && this._workspaceContext.trim().length > 0)
+		const enrichedContext = !!(this._rrrResult && this._rrrResult.messages.length > 0) || hasWorkspaceContext
 		const tagMatchDetails: Record<string, number> = {}
 		effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 
