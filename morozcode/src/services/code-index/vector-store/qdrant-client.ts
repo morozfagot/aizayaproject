@@ -1,5 +1,4 @@
 import { QdrantClient, Schemas } from "@qdrant/js-client-rest"
-import { createHash } from "crypto"
 import * as path from "path"
 import { v5 as uuidv5 } from "uuid"
 import { IVectorStore } from "../interfaces/vector-store"
@@ -77,10 +76,22 @@ export class QdrantVectorStore implements IVectorStore {
 			})
 		}
 
-		// Generate collection name from workspace path
-		const hash = createHash("sha256").update(workspacePath).digest("hex")
+		// Generate collection name from workspace path (normalized, human-readable)
+		const normalizedPath = path.normalize(workspacePath).toLowerCase()
+		const safeName = normalizedPath
+			.replace(/[\\/]/g, "-")
+			.replace(/[^a-z0-9-]/g, "-")
+			.replace(/-+/g, "-")
+			.replace(/^-|-$/g, "")
 		this.vectorSize = vectorSize
-		this.collectionName = `ws-${hash.substring(0, 16)}`
+		this.collectionName = `ws-${safeName}`
+	}
+
+	/**
+	 * Get the collection name (for diagnostics/logging)
+	 */
+	getCollectionName(): string {
+		return this.collectionName
 	}
 
 	/**
@@ -653,27 +664,30 @@ export class QdrantVectorStore implements IVectorStore {
 	 * Marks the indexing process as complete by storing metadata
 	 * Should be called after a successful full workspace scan or incremental scan
 	 */
-	async markIndexingComplete(): Promise<void> {
+	async markIndexingComplete(workspacePath?: string): Promise<void> {
 		try {
-			// Create a metadata point with a deterministic UUID to mark indexing as complete
-			// Use uuidv5 to generate a consistent UUID from a constant string
 			const metadataId = uuidv5("__indexing_metadata__", QDRANT_CODE_BLOCK_NAMESPACE)
+
+			const payload: Record<string, unknown> = {
+				type: "metadata",
+				indexing_complete: true,
+				completed_at: Date.now(),
+			}
+			if (workspacePath) {
+				payload.workspace_path = workspacePath
+			}
 
 			await this.client.upsert(this.collectionName, {
 				points: [
 					{
 						id: metadataId,
 						vector: new Array(this.vectorSize).fill(0),
-						payload: {
-							type: "metadata",
-							indexing_complete: true,
-							completed_at: Date.now(),
-						},
+						payload,
 					},
 				],
 				wait: true,
 			})
-			console.log("[QdrantVectorStore] Marked indexing as complete")
+			console.log(`[QdrantVectorStore] Marked indexing complete: collection="${this.collectionName}", workspace="${workspacePath || 'unknown'}"`)
 		} catch (error) {
 			console.error("[QdrantVectorStore] Failed to mark indexing as complete:", error)
 			throw error
@@ -704,10 +718,31 @@ export class QdrantVectorStore implements IVectorStore {
 				],
 				wait: true,
 			})
-			console.log("[QdrantVectorStore] Marked indexing as incomplete (in progress)")
+			console.log(`[QdrantVectorStore] Marked indexing incomplete: collection="${this.collectionName}"`)
 		} catch (error) {
 			console.error("[QdrantVectorStore] Failed to mark indexing as incomplete:", error)
 			throw error
+		}
+	}
+
+	/**
+	 * Get workspace path from collection metadata
+	 */
+	async getWorkspacePathFromMetadata(): Promise<string | null> {
+		try {
+			const metadataId = uuidv5("__indexing_metadata__", QDRANT_CODE_BLOCK_NAMESPACE)
+			const metadataPoints = await this.client.retrieve(this.collectionName, {
+				ids: [metadataId],
+			})
+			if (metadataPoints.length > 0) {
+				const workspacePath = metadataPoints[0].payload?.workspace_path
+				if (workspacePath) {
+					return workspacePath as string
+				}
+			}
+			return null
+		} catch {
+			return null
 		}
 	}
 }

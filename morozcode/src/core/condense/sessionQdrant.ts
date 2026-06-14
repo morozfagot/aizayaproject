@@ -1,5 +1,5 @@
 import { QdrantClient } from "@qdrant/js-client-rest"
-import { createHash } from "crypto"
+import * as path from "path"
 import * as vscode from "vscode"
 
 import type { EmbedderProvider } from "@roo-code/types"
@@ -12,6 +12,20 @@ import { getModelDimension } from "../../shared/embeddingModels"
  */
 
 const SESSION_COLLECTION_PREFIX = "session_"
+
+/**
+ * Normalize workspace path for consistent collection naming.
+ * Converts to lowercase, replaces path separators and special chars with dashes.
+ * Example: "C:\Users\Moroz\Desktop\AIWorkFlowContext" → "c-users-moroz-desktop-aiworkflowcontext"
+ */
+export function normalizeWorkspacePathForCollection(workspacePath: string): string {
+	const normalized = path.normalize(workspacePath).toLowerCase()
+	return normalized
+		.replace(/[\\/]/g, "-")
+		.replace(/[^a-z0-9-]/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "")
+}
 
 /**
  * Get API key for embedding from environment variables or VS Code config.
@@ -318,8 +332,11 @@ export async function ensureSessionCollection(
 	vectorSize: number,
 	apiKey?: string,
 ): Promise<{ client: QdrantClient; collectionName: string }> {
-	const hash = createHash("sha256").update(workspacePath).digest("hex")
-	const collectionName = `${SESSION_COLLECTION_PREFIX}${hash.substring(0, 16)}`
+	// Normalize workspace path for consistent collection naming
+	const safeName = normalizeWorkspacePathForCollection(workspacePath)
+	const collectionName = `${SESSION_COLLECTION_PREFIX}${safeName}`
+
+	console.log(`[ensureSessionCollection] workspacePath="${workspacePath}", collectionName="${collectionName}"`)
 
 	const client = new QdrantClient({
 		url: qdrantUrl || "http://localhost:6333",
@@ -455,6 +472,10 @@ export interface WorkspaceSearchFragment {
 	score: number
 }
 
+/**
+ * Search workspace code fragments using Qdrant vector search.
+ * Enhanced with comprehensive logging for diagnostics.
+ */
 export async function workspaceSearch(
 	query: string,
 	workspacePath: string,
@@ -463,20 +484,26 @@ export async function workspaceSearch(
 	embedderApiKey?: string,
 	embedderModelId?: string,
 ): Promise<WorkspaceSearchResult> {
+	const startTime = Date.now()
+	
 	try {
 		if (!query || query.trim().length === 0) {
+			console.log(`[workspaceSearch] ERROR: Empty query, workspacePath="${workspacePath}"`)
 			return { fragments: [], count: 0, error: "Empty query" }
 		}
 
 		if (!isQdrantConfigured()) {
+			console.log(`[workspaceSearch] ERROR: Qdrant not configured, workspacePath="${workspacePath}"`)
 			return { fragments: [], count: 0, error: "Qdrant not configured" }
 		}
 
 		const qdrantConfig = getQdrantConfig()
+		console.log(`[workspaceSearch] START: query="${query.substring(0, 50)}...", workspacePath="${workspacePath}", qdrantUrl="${qdrantConfig.url}"`)
 
 		// Use provided key first, fallback to config/env resolution
 		const apiKey = embedderApiKey || getEmbedderApiKey()
 		if (!apiKey) {
+			console.log(`[workspaceSearch] ERROR: No embedder API key, workspacePath="${workspacePath}"`)
 			return { fragments: [], count: 0, error: "No embedder API key" }
 		}
 
@@ -485,6 +512,7 @@ export async function workspaceSearch(
 		// Use provided modelId first, then fallback to config/env resolution
 		const modelId = embedderModelId || getEmbeddingModelId()
 		if (!modelId) {
+			console.log(`[workspaceSearch] ERROR: No embedding model ID configured, workspacePath="${workspacePath}"`)
 			return {
 				fragments: [],
 				count: 0,
@@ -499,6 +527,7 @@ export async function workspaceSearch(
 		const queryVector = embeddings[0]
 
 		if (!queryVector || queryVector.length === 0) {
+			console.log(`[workspaceSearch] ERROR: Failed to create embedding, workspacePath="${workspacePath}"`)
 			return { fragments: [], count: 0, error: "Failed to create embedding" }
 		}
 
@@ -507,10 +536,25 @@ export async function workspaceSearch(
 
 		const { QdrantVectorStore } = await import("../../services/code-index/vector-store/qdrant-client")
 		const vectorStore = new QdrantVectorStore(workspacePath, qdrantConfig.url, vectorSize, qdrantConfig.apiKey)
+		
+		console.log(`[workspaceSearch] Collection name: "${vectorStore.getCollectionName()}", vectorSize: ${vectorSize}, workspacePath: "${workspacePath}"`)
+		
 		await vectorStore.initialize()
+
+		// Get workspace path from collection metadata for diagnostics
+		const metadataWorkspacePath = await vectorStore.getWorkspacePathFromMetadata()
+		if (metadataWorkspacePath) {
+			console.log(`[workspaceSearch] Collection metadata workspace_path: "${metadataWorkspacePath}"`)
+			if (metadataWorkspacePath !== workspacePath) {
+				console.warn(`[workspaceSearch] WARNING: workspacePath mismatch! Passed="${workspacePath}", Collection metadata="${metadataWorkspacePath}"`)
+			}
+		} else {
+			console.log(`[workspaceSearch] Collection has no workspace_path metadata`)
+		}
 
 		const hasData = await vectorStore.hasIndexedData()
 		if (!hasData) {
+			console.log(`[workspaceSearch] ERROR: Workspace not indexed yet, collection="${vectorStore.getCollectionName()}", workspacePath="${workspacePath}"`)
 			return { fragments: [], count: 0, error: "Workspace not indexed yet" }
 		}
 
@@ -524,12 +568,14 @@ export async function workspaceSearch(
 			score: r.score ?? 0,
 		}))
 
-		console.log(`[workspaceSearch] Found ${fragments.length} code fragments for query: "${query.substring(0, 80)}..."`)
+		const elapsed = Date.now() - startTime
+		console.log(`[workspaceSearch] SUCCESS: Found ${fragments.length} fragments in ${elapsed}ms, collection="${vectorStore.getCollectionName()}", workspacePath="${workspacePath}"`)
 
 		return { fragments, count: fragments.length }
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
-		console.error(`[workspaceSearch] Failed: ${errorMessage}`)
+		const elapsed = Date.now() - startTime
+		console.error(`[workspaceSearch] FAILED after ${elapsed}ms: ${errorMessage}, workspacePath="${workspacePath}"`)
 		return { fragments: [], count: 0, error: errorMessage }
 	}
 }
