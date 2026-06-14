@@ -5085,6 +5085,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				finalUserContent.push({ type: "text" as const, text: workspaceContext })
 			}
 
+			// Log finalUserContent structure for diagnostics (for neural net analysis, not human reading)
+			const finalContentBlocks = finalUserContent.length
+			const finalContentSize = finalUserContent.reduce((sum, b) => sum + (typeof (b as any).text === "string" ? (b as any).text.length : 0), 0)
+			const hasWorkspaceContext = !!workspaceContext && workspaceContext.trim().length > 0
+			console.log(`[Task#${this.taskId}] finalUserContent: blocks=${finalContentBlocks}, size=${finalContentSize}, wsContext=${hasWorkspaceContext}`)
+
 			// Only add user message to conversation history if:
 
 			// 1. This is the first attempt (retryAttempt === 0), AND
@@ -5435,21 +5441,40 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				workspaceContext = ""
 				const wsGuardQdrant = isQdrantConfigured()
 				const wsGuardCwd = !!this.cwd
-	
-				// Build search query: use userTextContent if available, otherwise fallback to last message + system prompt
-				let wsSearchQuery = userTextContent.trim()
+
+				// Build search query: strip environment_details, use user text, fallback to last informative messages
+				const stripEnvDetails = (text: string): string => {
+					return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim()
+				}
+				let wsSearchQuery = stripEnvDetails(userTextContent)
 				if (wsSearchQuery.length === 0) {
-					// Fallback: use last user message from conversation history
-					const lastUserMsg = [...(this.apiConversationHistory || [])].reverse().find(m => m.role === "user")
-					if (lastUserMsg && typeof lastUserMsg.content === "string") {
-						wsSearchQuery = lastUserMsg.content.substring(0, 500)
-					} else if (lastUserMsg && Array.isArray(lastUserMsg.content)) {
-						wsSearchQuery = lastUserMsg.content
-							.filter((b: any) => b.type === "text")
-							.map((b: any) => b.text)
-							.join("\n")
-							.substring(0, 500)
+					// Fallback: collect text from last N user messages in conversation history, stripping env details
+					const MAX_FALLBACK_MESSAGES = 3
+					const MAX_QUERY_LENGTH = 2000
+					const fallbackTexts: string[] = []
+					const history = this.apiConversationHistory || []
+					for (let i = history.length - 1; i >= 0 && fallbackTexts.length < MAX_FALLBACK_MESSAGES; i--) {
+						const msg = history[i]
+						if (msg.role !== "user") continue
+						let text = ""
+						if (typeof msg.content === "string") {
+							text = msg.content
+						} else if (Array.isArray(msg.content)) {
+							text = msg.content
+								.filter((b: any) => b.type === "text")
+								.map((b: any) => b.text)
+								.join("\n")
+						}
+						const stripped = stripEnvDetails(text)
+						if (stripped.length > 0) {
+							fallbackTexts.unshift(stripped)
+						}
 					}
+					wsSearchQuery = fallbackTexts.join("\n\n").substring(0, MAX_QUERY_LENGTH)
+				}
+				// Final safety: limit query length to avoid embedding failures
+				if (wsSearchQuery.length > 2000) {
+					wsSearchQuery = wsSearchQuery.substring(0, 2000)
 				}
 	
 				const wsGuardPassed = wsGuardQdrant && wsGuardCwd && wsSearchQuery.length > 0
@@ -5484,8 +5509,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsSearchQuery: wsSearchQuery.substring(0, 200),
 							wsFragmentFiles: wsResult.fragments.map(f => f.filePath),
 							wsFragmentScores: wsResult.fragments.map(f => f.score),
+							wsFragmentTexts: wsResult.fragments.map(f => f.codeChunk.substring(0, 500)),
 						}, {
-							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}`,
+							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, query="${wsSearchQuery.substring(0, 100)}"`,
 							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}\n\n${fullFragmentText}`,
 							modelUsed: "workspace-search",
 						})

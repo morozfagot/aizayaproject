@@ -1,5 +1,23 @@
 # Morozcode Changelog
 
+## 2.3.15
+
+### Bug Fixes
+
+- **Fix workspace search querying by environment_details instead of user text**: `wsSearchQuery` was formed from `userTextContent` which contained `<environment_details>` blocks, causing WS to search by metadata instead of user's actual request. Fixed by adding `stripEnvDetails()` helper that removes `<environment_details>...</environment_details>` blocks from query text. Fallback now collects last N user messages from conversation history (instead of just one) with env details stripped, providing more informative search context. Added `wsFragmentTexts` to pipeline logging for diagnostics. ([`Task.ts:5433`](AiZayaProject/morozcode/src/core/task/Task.ts#L5433))
+
+## 2.3.14
+
+### Bug Fixes
+
+- **Revert Qdrant collection name to SHA256 hash**: Reverted human-readable collection names back to SHA256 hash format (`ws-{hash}`) to maintain backward compatibility with existing collections. The human-readable naming broke backward compatibility because existing collections used hash-based names. ([`qdrant-client.ts:80`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L80))
+
+## 2.3.13
+
+### Features
+
+- **Human-readable Qdrant collection names**: Replaced SHA256 hash-based collection names with normalized, human-readable names derived from workspace path. Collection name format changed from `ws-{hash}` to `ws-{normalized-path}` (e.g. `ws-c-users-moroz-desktop-aiworkflowcontext`). This makes it immediately clear which workspace a collection belongs to, and ensures consistent naming regardless of path format differences (slashes, case, trailing separators). Added `normalizeWorkspacePathForCollection()` utility function in `sessionQdrant.ts` and applied same normalization in `QdrantVectorStore` constructor in `qdrant-client.ts`. ([`qdrant-client.ts:80-88`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L80), [`sessionQdrant.ts:17-28`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L17))
+
 ## 2.3.8
 
 ### Bug Fixes
