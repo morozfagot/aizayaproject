@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.0
+
+### Features
+
+- **Auto-approval: bypass allowlist when `alwaysAllowExecute` is enabled**: When `alwaysAllowExecute` is `true`, all commands are now auto-approved by default. Only the `deniedCommands` (denylist) can still block specific commands. Previously, commands had to be in the `allowedCommands` allowlist even with `alwaysAllowExecute` enabled, which defeated the purpose of the setting. ([`index.ts:119`](AiZayaProject/morozcode/src/core/auto-approval/index.ts#L119))
+
 ## 2.3.15
 
 ### Bug Fixes

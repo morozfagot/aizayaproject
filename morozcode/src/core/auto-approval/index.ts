@@ -117,15 +117,20 @@ export async function checkAutoApproval({
 		}
 
 		if (state.alwaysAllowExecute === true) {
-			const decision = getCommandDecision(text, state.allowedCommands || [], state.deniedCommands || [])
+			// When alwaysAllowExecute is enabled, all commands are auto-approved
+			// by default. Only the denylist (deniedCommands) can still block.
+			const deniedCommands = state.deniedCommands || []
 
-			if (decision === "auto_approve") {
-				return { decision: "approve" }
-			} else if (decision === "auto_deny") {
-				return { decision: "deny" }
-			} else {
-				return { decision: "ask" }
+			if (deniedCommands.length > 0) {
+				// Check only against denylist — empty allowedCommands means no allowlist filtering
+				const decision = getCommandDecision(text, [], deniedCommands)
+
+				if (decision === "auto_deny") {
+					return { decision: "deny" }
+				}
 			}
+
+			return { decision: "approve" }
 		}
 	}
 
