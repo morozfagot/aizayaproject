@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.4
+
+### Bug Fixes
+
+- **Fix enrichedMessageCount formula to use messagesSent + wsFragmentCount**: `enrichedMessageCount` was calculated as `(rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount`, which gave incorrect results when RRR failed (extractedTsCount = 0). The formula now correctly uses `cleanConversationHistory.length + wsFragmentCount` to reflect the actual number of messages sent to the model plus WS fragments. This matches the expected behavior: `messagesSent:1 + wsFragmentCount:1 = 2`, `messagesSent:3 + wsFragmentCount:1 = 4`, etc. Fixed in both success and error paths. ([`Task.ts:9122`](AiZayaProject/morozcode/src/core/task/Task.ts#L9122), [`Task.ts:9176`](AiZayaProject/morozcode/src/core/task/Task.ts#L9176))
+
 ## 2.4.3
 
 ### Bug Fixes

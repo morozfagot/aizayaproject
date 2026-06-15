@@ -9120,7 +9120,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				fallbackUsed: !enrichedContext,
 
 				enrichedMessageCount: enrichedContext
-					? ((rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount)
+					? (cleanConversationHistory.length + wsFragmentCount)
 					: 0,
 
 				wsFragmentCount,
@@ -9174,7 +9174,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				fallbackUsed: !enrichedContext,
 	
 					enrichedMessageCount: enrichedContext
-						? ((rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount)
+						? (cleanConversationHistory.length + wsFragmentCount)
 						: 0,
 	
 					wsFragmentCount,
