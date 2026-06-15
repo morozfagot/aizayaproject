@@ -9043,6 +9043,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 
 
+		const wsFragmentCount = hasWorkspaceContext ? 1 : 0;
+
 		try {
 
 			// Awaiting first chunk to see if it will throw an error.
@@ -9117,13 +9119,17 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				fallbackUsed: !enrichedContext,
 
-				enrichedMessageCount: enrichedContext ? (rrrDiagnostics?.extractedTsCount ?? cleanConversationHistory.length) : 0,
+				enrichedMessageCount: enrichedContext
+					? ((rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount)
+					: 0,
+
+				wsFragmentCount,
 
 				totalMessageSize: JSON.stringify(cleanConversationHistory).length,
 
 			}, {
 
-				originalRequest: systemPrompt,
+				originalRequest: systemPrompt + (hasWorkspaceContext ? this._workspaceContext : ""),
 
 				originalResponse: `First chunk received. Messages: ${cleanConversationHistory.length}, enriched: ${enrichedContext}`,
 
@@ -9166,10 +9172,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				messagesSummary,
 
 				fallbackUsed: !enrichedContext,
-
-				enrichedMessageCount: enrichedContext ? (rrrDiagnostics?.extractedTsCount ?? cleanConversationHistory.length) : 0,
-
-				totalMessageSize: JSON.stringify(cleanConversationHistory).length,
+	
+					enrichedMessageCount: enrichedContext
+						? ((rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount)
+						: 0,
+	
+					wsFragmentCount,
+	
+					totalMessageSize: JSON.stringify(cleanConversationHistory).length,
 
 			}, {
 

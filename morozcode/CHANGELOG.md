@@ -1,5 +1,17 @@
 # Morozcode Changelog
 
+## 2.4.3
+
+### Bug Fixes
+
+- **Fix originalRequest not showing WS context in step 4 logs**: `originalRequest` in step 4 pipeline logs only contained `systemPrompt`, making it impossible to see if WS context was actually sent to the model. Fixed by appending `this._workspaceContext` to `originalRequest` when present: `systemPrompt + (hasWorkspaceContext ? this._workspaceContext : "")`. Now logs show the complete request including WS fragments. ([`Task.ts:9132`](AiZayaProject/morozcode/src/core/task/Task.ts#L9132))
+
+## 2.4.2
+
+### Bug Fixes
+
+- **Fix enrichedMessageCount not accounting for WS context**: `enrichedMessageCount` was calculated using only `rrrDiagnostics?.extractedTsCount`, which is 0 when RRR fails (no embedding model configured). This made it appear as if no enrichment was happening, even when WS context was successfully injected. Fixed by adding `wsFragmentCount` to the formula: `(rrrDiagnostics?.extractedTsCount ?? 0) + wsFragmentCount`. Now `enrichedMessageCount` correctly reflects WS enrichment independently of RRR state. Added `wsFragmentCount` field to step 4 pipeline logs for diagnostics. ([`Task.ts:9046`](AiZayaProject/morozcode/src/core/task/Task.ts#L9046))
+
 ## 2.4.1
 
 ### Bug Fixes
