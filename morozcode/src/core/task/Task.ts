@@ -5454,8 +5454,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim()
 				}
 				let wsSearchQuery = stripEnvDetails(userTextContent)
+				let fallbackUsed = false
 				if (wsSearchQuery.length === 0) {
 					// Fallback: collect text from last N user messages in conversation history, stripping env details
+					fallbackUsed = true
 					const MAX_FALLBACK_MESSAGES = 3
 					const MAX_QUERY_LENGTH = 2000
 					const fallbackTexts: string[] = []
@@ -5512,7 +5514,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsResultCount: wsResult.count,
 							wsError: wsResult.error || null,
 							embedderModelId: embedderModelId || "undefined",
-							usedFallback: userTextContent.trim().length === 0,
+							usedFallback: fallbackUsed,
 							wsSearchQuery: wsSearchQuery.substring(0, 200),
 							wsFragmentFiles: wsResult.fragments.map(f => f.filePath),
 							wsFragmentScores: wsResult.fragments.map(f => f.score),

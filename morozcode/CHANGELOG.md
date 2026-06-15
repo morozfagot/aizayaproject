@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.5
+
+### Bug Fixes
+
+- **Fix fallback query in WS search — use actual stripped query for usedFallback flag**: `usedFallback` was determined by `userTextContent.trim().length === 0` (before stripping environment_details), causing incorrect `usedFallback:true` on steps where user text contained only environment_details. Fixed by introducing `fallbackUsed` flag that tracks whether the fallback path was actually taken (i.e., `wsSearchQuery` was empty after stripping). Now `usedFallback` correctly reflects whether the fallback to conversation history was used. ([`Task.ts:5457`](AiZayaProject/morozcode/src/core/task/Task.ts#L5457), [`Task.ts:5515`](AiZayaProject/morozcode/src/core/task/Task.ts#L5515))
+
 ## 2.4.4
 
 ### Bug Fixes
