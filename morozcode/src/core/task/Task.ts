@@ -282,7 +282,7 @@ import {
 
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
 
-import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithVectorSearch, isQdrantConfigured, workspaceSearch, type WorkspaceSearchResult } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithVectorSearch, isQdrantConfigured, workspaceSearch, type WorkspaceSearchResult, type WorkspaceSearchStats } from "../condense"
 
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
@@ -5555,9 +5555,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsFragmentTexts: wsResult.fragments.map(f => f.codeChunk.substring(0, 500)),
 							wsFragmentTypes,
 							wsAppliedWeights: wsFileTypeWeights ?? { code: 1.0, config: 0.8, doc: 0.6, other: 0.4 },
+							wsStats: wsResult.stats ?? null,
 						}, {
 							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, query="${wsSearchQuery.substring(0, 100)}"`,
-							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}\n\n${fullFragmentText}`,
+							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}${wsResult.stats ? `\nWS_STATS: ${JSON.stringify(wsResult.stats)}` : ""}\n\n${fullFragmentText}`,
 							modelUsed: "workspace-search",
 						})
 					} catch (error) {

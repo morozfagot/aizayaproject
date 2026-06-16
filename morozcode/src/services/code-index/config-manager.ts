@@ -26,6 +26,7 @@ export class CodeIndexConfigManager {
 	private qdrantApiKey?: string
 	private searchMinScore?: number
 	private searchMaxResults?: number
+	private searchFileTypeWeights?: { code?: number; config?: number; doc?: number; other?: number }
 
 	constructor(private readonly contextProxy: ContextProxy) {
 		// Initialize with current configuration to avoid false restart triggers
@@ -51,12 +52,17 @@ export class CodeIndexConfigManager {
 			codebaseIndexEmbedderProvider: "openai",
 			codebaseIndexEmbedderBaseUrl: "",
 			codebaseIndexEmbedderModelId: "",
+			codebaseIndexEmbedderModelDimension: undefined,
 			codebaseIndexSearchMinScore: undefined,
 			codebaseIndexSearchMaxResults: undefined,
+			codebaseIndexSearchFileTypeWeights: undefined,
+			codebaseIndexOpenAiCompatibleBaseUrl: "",
 			codebaseIndexBedrockRegion: "us-east-1",
 			codebaseIndexBedrockProfile: "",
+			codebaseIndexOpenRouterSpecificProvider: "",
 		}
 
+		const cfg = codebaseIndexConfig as Record<string, unknown>
 		const {
 			codebaseIndexEnabled,
 			codebaseIndexQdrantUrl,
@@ -65,7 +71,8 @@ export class CodeIndexConfigManager {
 			codebaseIndexEmbedderModelId,
 			codebaseIndexSearchMinScore,
 			codebaseIndexSearchMaxResults,
-		} = codebaseIndexConfig
+		} = cfg as any
+		const codebaseIndexSearchFileTypeWeights = cfg.codebaseIndexSearchFileTypeWeights as { code?: number; config?: number; doc?: number; other?: number } | undefined
 
 		const openAiKey = this.contextProxy?.getSecret("codeIndexOpenAiKey") ?? ""
 		const qdrantApiKey = this.contextProxy?.getSecret("codeIndexQdrantApiKey") ?? ""
@@ -86,6 +93,7 @@ export class CodeIndexConfigManager {
 		this.qdrantApiKey = qdrantApiKey ?? ""
 		this.searchMinScore = codebaseIndexSearchMinScore
 		this.searchMaxResults = codebaseIndexSearchMaxResults
+		this.searchFileTypeWeights = codebaseIndexSearchFileTypeWeights ?? undefined
 
 		// Validate and set model dimension
 		const rawDimension = codebaseIndexConfig.codebaseIndexEmbedderModelDimension
@@ -460,11 +468,12 @@ export class CodeIndexConfigManager {
 			qdrantApiKey: this.qdrantApiKey,
 			searchMinScore: this.currentSearchMinScore,
 			searchMaxResults: this.currentSearchMaxResults,
+			searchFileTypeWeights: this.searchFileTypeWeights,
 		}
 	}
 
 	/**
-	 * Gets whether the code indexing feature is enabled
+		* Gets whether the code indexing feature is enabled
 	 */
 	public get isFeatureEnabled(): boolean {
 		return this.codebaseIndexEnabled

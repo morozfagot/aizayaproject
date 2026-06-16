@@ -21,6 +21,12 @@ export interface CodeIndexConfig {
 	qdrantApiKey?: string
 	searchMinScore?: number
 	searchMaxResults?: number
+	searchFileTypeWeights?: {
+		code?: number
+		config?: number
+		doc?: number
+		other?: number
+	}
 }
 
 /**

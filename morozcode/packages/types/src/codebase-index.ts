@@ -42,6 +42,23 @@ export const codebaseIndexConfigSchema = z.object({
 		.min(CODEBASE_INDEX_DEFAULTS.MIN_SEARCH_RESULTS)
 		.max(CODEBASE_INDEX_DEFAULTS.MAX_SEARCH_RESULTS)
 		.optional(),
+	codebaseIndexSearchFileTypeWeights: z
+		.object({
+			code: z.number().min(0).max(2).optional(),
+			config: z.number().min(0).max(2).optional(),
+			doc: z.number().min(0).max(2).optional(),
+			other: z.number().min(0).max(2).optional(),
+		})
+		.optional(),
+	// Workspace search file type weights (used by Task.ts via vscode.workspace.getConfiguration)
+	codebaseIndexWsFileTypeWeights: z
+		.object({
+			code: z.number().min(0).max(2).optional(),
+			config: z.number().min(0).max(2).optional(),
+			doc: z.number().min(0).max(2).optional(),
+			other: z.number().min(0).max(2).optional(),
+		})
+		.optional(),
 	// OpenAI Compatible specific fields
 	codebaseIndexOpenAiCompatibleBaseUrl: z.string().optional(),
 	codebaseIndexOpenAiCompatibleModelDimension: z.number().optional(),

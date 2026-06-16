@@ -458,10 +458,18 @@ export function extractTsFromChunkId(chunkId: string): string | null {
 
 // ─── Workspace RAG Search ─────────────────────────────────────────────────────
 
+export interface WorkspaceSearchStats {
+	typeDistribution: { code: number; config: number; doc: number; other: number }
+	weightImpact: { avgScoreDelta: number; maxScoreDelta: number; avgWeightApplied: number }
+	rankingChanges: { promoted: number; demoted: number; unchanged: number }
+	weightsUsed: { code: number; config: number; doc: number; other: number }
+}
+
 export interface WorkspaceSearchResult {
 	fragments: WorkspaceSearchFragment[]
 	count: number
 	error?: string
+	stats?: WorkspaceSearchStats
 }
 
 export interface WorkspaceSearchFragment {
@@ -599,14 +607,49 @@ export async function workspaceSearch(
 		fragments.sort((a, b) => (b.adjustedScore ?? 0) - (a.adjustedScore ?? 0))
 		const topFragments = fragments.slice(0, limit)
 
+		// ─── Compute ranking statistics ───────────────────────────────────────
+		const typeDistribution = { code: 0, config: 0, doc: 0, other: 0 }
+		let totalScoreDelta = 0
+		let maxScoreDelta = 0
+		let totalWeightApplied = 0
+		for (const f of topFragments) {
+			typeDistribution[f.fileType as keyof typeof typeDistribution]++
+			const delta = Math.abs((f.adjustedScore ?? f.score) - f.score)
+			totalScoreDelta += delta
+			if (delta > maxScoreDelta) maxScoreDelta = delta
+			const w = f.score > 0 ? (f.adjustedScore ?? f.score) / f.score : 1.0
+			totalWeightApplied += w
+		}
+		const avgScoreDelta = topFragments.length > 0 ? totalScoreDelta / topFragments.length : 0
+		const avgWeightApplied = topFragments.length > 0 ? totalWeightApplied / topFragments.length : 1.0
+
+		// Ranking changes: compare original order vs adjusted order
+		const originalOrder = [...fragments].sort((a, b) => b.score - a.score)
+		const adjustedOrder = [...fragments].sort((a, b) => (b.adjustedScore ?? 0) - (a.adjustedScore ?? 0))
+		let promoted = 0, demoted = 0, unchanged = 0
+		for (let i = 0; i < Math.min(originalOrder.length, limit); i++) {
+			const origIdx = originalOrder.indexOf(adjustedOrder[i]!)
+			if (origIdx === i) unchanged++
+			else if (origIdx > i) promoted++
+			else demoted++
+		}
+
+		const stats: WorkspaceSearchStats = {
+			typeDistribution,
+			weightImpact: { avgScoreDelta, maxScoreDelta, avgWeightApplied },
+			rankingChanges: { promoted, demoted, unchanged },
+			weightsUsed: { code: weights.code!, config: weights.config!, doc: weights.doc!, other: weights.other! },
+		}
+
 		const elapsed = Date.now() - startTime
 		console.log(`[workspaceSearch] SUCCESS: Found ${topFragments.length} fragments in ${elapsed}ms, collection="${vectorStore.getCollectionName()}", workspacePath="${workspacePath}"`)
 		console.log(`[workspaceSearch] Weights applied: code=${weights.code}, config=${weights.config}, doc=${weights.doc}, other=${weights.other}`)
 		for (const f of topFragments) {
 			console.log(`[workspaceSearch]   ${f.filePath}: original=${f.score.toFixed(4)}, adjusted=${f.adjustedScore?.toFixed(4)}, type=${f.fileType}`)
 		}
+		console.log(`[WS_STATS] ${JSON.stringify(stats)}`)
 
-		return { fragments: topFragments, count: topFragments.length }
+		return { fragments: topFragments, count: topFragments.length, stats }
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
 		const elapsed = Date.now() - startTime

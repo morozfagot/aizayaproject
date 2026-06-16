@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.9
+
+### Features
+
+- **Add iterative weight tuning system for workspace search ranking**: Implemented `WorkspaceSearchStats` interface with `typeDistribution`, `weightImpact`, `rankingChanges`, and `weightsUsed` fields. Added statistics computation in `workspaceSearch()` — logs `WS_STATS:` JSON with distribution of file types, average/max score delta from weight application, and ranking changes (promoted/demoted/unchanged). Added `searchFileTypeWeights` option to `CodeIndexConfig` (config-manager.ts) with defaults `{ code: 1.0, config: 0.8, doc: 0.6, other: 0.4 }`. Added `codebaseIndexSearchFileTypeWeights` and `codebaseIndexWsFileTypeWeights` to zod schema (`codebase-index.ts`). Exported `WorkspaceSearchStats` type from `condense/index.ts`. Pipeline logger now includes `wsStats` field. Documentation: `2.9.14.4_weight_tuning.md`.
+
 ## 2.4.8
 
 ### Features
