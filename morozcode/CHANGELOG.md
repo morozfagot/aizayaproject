@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.8
+
+### Features
+
+- **Add file type ranking with configurable weights to workspace search**: Implemented score adjustment in `workspaceSearch()` based on file type weights. Added `fileTypeWeights` parameter with defaults `{ code: 1.0, config: 0.8, doc: 0.6, other: 0.4 }`. After Qdrant search, each fragment's score is multiplied by its file type weight (`adjustedScore = originalScore * weight`), then results are re-sorted by adjusted score and top-k is selected. Added `adjustedScore` field to `WorkspaceSearchFragment` interface. Added `wsAdjustedScores` logging in pipeline (original score, adjusted score, weight applied per fragment). Weights are configurable via `roo-code.codebaseIndex.wsFileTypeWeights` VS Code setting. Exported `FileTypeWeights` type and `DEFAULT_FILE_TYPE_WEIGHTS` constant. This ensures code files rank higher for code analysis tasks. ([`sessionQdrant.ts:477`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L477), [`sessionQdrant.ts:496`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L496), [`Task.ts:5513`](AiZayaProject/morozcode/src/core/task/Task.ts#L5513), [`condense/index.ts:847`](AiZayaProject/morozcode/src/core/condense/index.ts#L847))
+
 ## 2.4.7
 
 ### Features

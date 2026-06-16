@@ -471,6 +471,21 @@ export interface WorkspaceSearchFragment {
 	endLine: number
 	codeChunk: string
 	score: number
+	adjustedScore?: number
+}
+
+export interface FileTypeWeights {
+	code?: number
+	config?: number
+	doc?: number
+	other?: number
+}
+
+export const DEFAULT_FILE_TYPE_WEIGHTS: FileTypeWeights = {
+	code: 1.0,
+	config: 0.8,
+	doc: 0.6,
+	other: 0.4,
 }
 
 /**
@@ -484,9 +499,11 @@ export async function workspaceSearch(
 	minScore: number = 0.3,
 	embedderApiKey?: string,
 	embedderModelId?: string,
+	fileTypeWeights?: FileTypeWeights,
 ): Promise<WorkspaceSearchResult> {
 	const startTime = Date.now()
-	
+	const weights = { ...DEFAULT_FILE_TYPE_WEIGHTS, ...fileTypeWeights }
+
 	try {
 		if (!query || query.trim().length === 0) {
 			console.log(`[workspaceSearch] ERROR: Empty query, workspacePath="${workspacePath}"`)
@@ -561,19 +578,35 @@ export async function workspaceSearch(
 
 		const searchResults = await vectorStore.search(queryVector, undefined, minScore, limit)
 
-		const fragments: WorkspaceSearchFragment[] = searchResults.map((r) => ({
-			filePath: r.payload?.filePath as string,
-			fileType: (r.payload?.fileType as string) || 'other',
-			startLine: r.payload?.startLine as number,
-			endLine: r.payload?.endLine as number,
-			codeChunk: r.payload?.codeChunk as string,
-			score: r.score ?? 0,
-		}))
+		// Build fragments with adjusted score based on file type weights
+		const fragments: WorkspaceSearchFragment[] = searchResults.map((r) => {
+			const fileType = (r.payload?.fileType as string) || 'other'
+			const originalScore = r.score ?? 0
+			const weight = weights[fileType as keyof FileTypeWeights] ?? 1.0
+			const adjustedScore = originalScore * weight
+			return {
+				filePath: r.payload?.filePath as string,
+				fileType,
+				startLine: r.payload?.startLine as number,
+				endLine: r.payload?.endLine as number,
+				codeChunk: r.payload?.codeChunk as string,
+				score: originalScore,
+				adjustedScore,
+			}
+		})
+
+		// Sort by adjusted score (descending) and take top-k
+		fragments.sort((a, b) => (b.adjustedScore ?? 0) - (a.adjustedScore ?? 0))
+		const topFragments = fragments.slice(0, limit)
 
 		const elapsed = Date.now() - startTime
-		console.log(`[workspaceSearch] SUCCESS: Found ${fragments.length} fragments in ${elapsed}ms, collection="${vectorStore.getCollectionName()}", workspacePath="${workspacePath}"`)
+		console.log(`[workspaceSearch] SUCCESS: Found ${topFragments.length} fragments in ${elapsed}ms, collection="${vectorStore.getCollectionName()}", workspacePath="${workspacePath}"`)
+		console.log(`[workspaceSearch] Weights applied: code=${weights.code}, config=${weights.config}, doc=${weights.doc}, other=${weights.other}`)
+		for (const f of topFragments) {
+			console.log(`[workspaceSearch]   ${f.filePath}: original=${f.score.toFixed(4)}, adjusted=${f.adjustedScore?.toFixed(4)}, type=${f.fileType}`)
+		}
 
-		return { fragments, count: fragments.length }
+		return { fragments: topFragments, count: topFragments.length }
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error)
 		const elapsed = Date.now() - startTime

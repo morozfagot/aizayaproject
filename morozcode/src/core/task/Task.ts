@@ -5507,6 +5507,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				if (wsGuardPassed) {
 					try {
 						const embedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
+						// Get file type weights from config or use defaults
+						const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+						const wsFileTypeWeights = config.get<{ code?: number; config?: number; doc?: number; other?: number }>("wsFileTypeWeights")
 						const wsResult = await workspaceSearch(
 							wsSearchQuery,
 							this.cwd,
@@ -5514,16 +5517,17 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							0.3,
 							embedderApiKey,
 							embedderModelId,
+							wsFileTypeWeights ?? undefined,
 						)
 						if (wsResult.count > 0) {
 							const contextParts = wsResult.fragments.map((f, idx) =>
-								`[Code Fragment ${idx + 1}] File: ${f.filePath} (lines ${f.startLine}-${f.endLine}, score: ${f.score.toFixed(2)})\n\`\`\`\n${f.codeChunk}\n\`\`\``,
+								`[Code Fragment ${idx + 1}] File: ${f.filePath} (lines ${f.startLine}-${f.endLine}, score: ${f.score.toFixed(2)}, adjusted: ${f.adjustedScore?.toFixed(2) ?? f.score.toFixed(2)})\n\`\`\`\n${f.codeChunk}\n\`\`\``,
 							)
 							this._workspaceContext = `\n\n## Relevant Code from Workspace\nThe following code fragments are semantically related to the user's request:\n\n${contextParts.join("\n\n")}\n`
 						}
 						// Build flat, model-readable fragment text for Redis storage
 						const fragmentTexts = wsResult.fragments.map((f, idx) =>
-							`[Fragment ${idx + 1}] file=${f.filePath} lines=${f.startLine}-${f.endLine} score=${f.score.toFixed(3)}\n${f.codeChunk}`
+							`[Fragment ${idx + 1}] file=${f.filePath} lines=${f.startLine}-${f.endLine} score=${f.score.toFixed(3)} adjusted=${f.adjustedScore?.toFixed(3) ?? f.score.toFixed(3)}\n${f.codeChunk}`
 						)
 						const fullFragmentText = fragmentTexts.join("\n\n---\n\n")
 						const wsFragmentTypes = { code: 0, config: 0, doc: 0, other: 0 }
@@ -5531,6 +5535,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							const t = getFileType(f.filePath)
 							wsFragmentTypes[t]++
 						}
+						// Build adjusted scores log
+						const wsAdjustedScores = wsResult.fragments.map(f => ({
+							file: f.filePath,
+							fileType: f.fileType,
+							originalScore: f.score,
+							adjustedScore: f.adjustedScore ?? f.score,
+							weightApplied: (f.adjustedScore !== undefined && f.score > 0) ? f.adjustedScore / f.score : 1.0,
+						}))
 						await this.pipelineLogger.logStep("ws", "success", {
 							wsResultCount: wsResult.count,
 							wsError: wsResult.error || null,
@@ -5539,8 +5551,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsSearchQuery: wsSearchQuery.substring(0, 200),
 							wsFragmentFiles: wsResult.fragments.map(f => ({ path: f.filePath, type: getFileType(f.filePath) })),
 							wsFragmentScores: wsResult.fragments.map(f => f.score),
+							wsAdjustedScores,
 							wsFragmentTexts: wsResult.fragments.map(f => f.codeChunk.substring(0, 500)),
 							wsFragmentTypes,
+							wsAppliedWeights: wsFileTypeWeights ?? { code: 1.0, config: 0.8, doc: 0.6, other: 0.4 },
 						}, {
 							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, query="${wsSearchQuery.substring(0, 100)}"`,
 							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}\n\n${fullFragmentText}`,

@@ -844,5 +844,5 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 }
 
 
-export { isQdrantConfigured, workspaceSearch }
-export type { WorkspaceSearchResult } from "./sessionQdrant"
+export { isQdrantConfigured, workspaceSearch, DEFAULT_FILE_TYPE_WEIGHTS } from "./sessionQdrant"
+export type { WorkspaceSearchResult, FileTypeWeights } from "./sessionQdrant"
