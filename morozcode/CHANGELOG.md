@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.7
+
+### Features
+
+- **Add fileType to Qdrant payload for context ranking**: Added `fileType` field (`code`/`config`/`doc`/`other`) to Qdrant payload during indexing in `upsertPoints()`. The `getFileType()` function classifies files by extension (e.g., `.ts` → `code`, `.json` → `config`, `.md` → `doc`). Updated `search()` to include `fileType` in `with_payload.include`. Updated `isPayloadValid()` to require `fileType` in payload. This enables downstream ranking by file type in workspace search results. ([`qdrant-client.ts:24`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L24), [`qdrant-client.ts:408`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L408), [`qdrant-client.ts:520`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L520), [`qdrant-client.ts:450`](AiZayaProject/morozcode/src/services/code-index/vector-store/qdrant-client.ts#L450))
+
 ## 2.4.6
 
 ### Features

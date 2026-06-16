@@ -7,6 +7,29 @@ import { DEFAULT_MAX_SEARCH_RESULTS, DEFAULT_SEARCH_MIN_SCORE, QDRANT_CODE_BLOCK
 import { t } from "../../../i18n"
 
 /**
+ * File type classification based on extension.
+ * Used for context ranking in workspace search.
+ */
+export type FileType = "code" | "config" | "doc" | "other"
+
+const CODE_EXTENSIONS = new Set([".ts", ".js", ".tsx", ".jsx", ".cs", ".py", ".java", ".go", ".rs", ".cpp", ".c", ".h", ".swift", ".kt"])
+const CONFIG_EXTENSIONS = new Set([".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".env", ".cfg", ".conf"])
+const DOC_EXTENSIONS = new Set([".md", ".txt", ".rst", ".adoc"])
+
+/**
+ * Determines the file type based on its extension.
+ * @param filePath Path to the file
+ * @returns FileType classification: "code", "config", "doc", or "other"
+ */
+export function getFileType(filePath: string): FileType {
+	const ext = path.extname(filePath).toLowerCase()
+	if (CODE_EXTENSIONS.has(ext)) return "code"
+	if (CONFIG_EXTENSIONS.has(ext)) return "config"
+	if (DOC_EXTENSIONS.has(ext)) return "doc"
+	return "other"
+}
+
+/**
  * Qdrant implementation of the vector store interface
  */
 export class QdrantVectorStore implements IVectorStore {
@@ -398,6 +421,7 @@ export class QdrantVectorStore implements IVectorStore {
 						payload: {
 							...point.payload,
 							pathSegments,
+							fileType: getFileType(point.payload.filePath),
 						},
 					}
 				}
@@ -423,7 +447,7 @@ export class QdrantVectorStore implements IVectorStore {
 		if (!payload) {
 			return false
 		}
-		const validKeys = ["filePath", "codeChunk", "startLine", "endLine"]
+		const validKeys = ["filePath", "codeChunk", "startLine", "endLine", "fileType"]
 		const hasValidKeys = validKeys.every((key) => key in payload)
 		return hasValidKeys
 	}
@@ -493,8 +517,8 @@ export class QdrantVectorStore implements IVectorStore {
 					exact: false,
 				},
 				with_payload: {
-					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
-				},
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
+					},
 			}
 
 			const operationResult = await this.client.query(this.collectionName, searchRequest)

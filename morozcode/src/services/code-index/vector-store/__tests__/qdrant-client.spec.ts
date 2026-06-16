@@ -1094,40 +1094,42 @@ describe("QdrantVectorStore", () => {
 
 			expect(mockQdrantClientInstance.upsert).toHaveBeenCalledTimes(1)
 			expect(mockQdrantClientInstance.upsert).toHaveBeenCalledWith(expectedCollectionName, {
-				points: [
-					{
-						id: "test-id-1",
-						vector: [0.1, 0.2, 0.3],
-						payload: {
-							filePath: "src/components/Button.tsx",
-							content: "export const Button = () => {}",
-							startLine: 1,
-							endLine: 3,
-							pathSegments: {
-								"0": "src",
-								"1": "components",
-								"2": "Button.tsx",
+					points: [
+						{
+							id: "test-id-1",
+							vector: [0.1, 0.2, 0.3],
+							payload: {
+								filePath: "src/components/Button.tsx",
+								content: "export const Button = () => {}",
+								startLine: 1,
+								endLine: 3,
+								pathSegments: {
+									"0": "src",
+									"1": "components",
+									"2": "Button.tsx",
+								},
+								fileType: "code",
 							},
 						},
-					},
-					{
-						id: "test-id-2",
-						vector: [0.4, 0.5, 0.6],
-						payload: {
-							filePath: "src/utils/helpers.ts",
-							content: "export function helper() {}",
-							startLine: 5,
-							endLine: 7,
-							pathSegments: {
-								"0": "src",
-								"1": "utils",
-								"2": "helpers.ts",
+						{
+							id: "test-id-2",
+							vector: [0.4, 0.5, 0.6],
+							payload: {
+								filePath: "src/utils/helpers.ts",
+								content: "export function helper() {}",
+								startLine: 5,
+								endLine: 7,
+								pathSegments: {
+									"0": "src",
+									"1": "utils",
+									"2": "helpers.ts",
+								},
+								fileType: "code",
 							},
 						},
-					},
-				],
-				wait: true,
-			})
+					],
+					wait: true,
+				})
 		})
 
 		it("should handle points without filePath in payload", async () => {
@@ -1193,27 +1195,28 @@ describe("QdrantVectorStore", () => {
 			await vectorStore.upsertPoints(mockPoints)
 
 			expect(mockQdrantClientInstance.upsert).toHaveBeenCalledWith(expectedCollectionName, {
-				points: [
-					{
-						id: "test-id-1",
-						vector: [0.1, 0.2, 0.3],
-						payload: {
-							filePath: "src/components/ui/forms/InputField.tsx",
-							content: "export const InputField = () => {}",
-							startLine: 1,
-							endLine: 3,
-							pathSegments: {
-								"0": "src",
-								"1": "components",
-								"2": "ui",
-								"3": "forms",
-								"4": "InputField.tsx",
+					points: [
+						{
+							id: "test-id-1",
+							vector: [0.1, 0.2, 0.3],
+							payload: {
+								filePath: "src/components/ui/forms/InputField.tsx",
+								content: "export const InputField = () => {}",
+								startLine: 1,
+								endLine: 3,
+								pathSegments: {
+									"0": "src",
+									"1": "components",
+									"2": "ui",
+									"3": "forms",
+									"4": "InputField.tsx",
+								},
+								fileType: "code",
 							},
 						},
-					},
-				],
-				wait: true,
-			})
+					],
+					wait: true,
+				})
 		})
 
 		it("should handle error scenarios when qdrantClient.upsert fails", async () => {
@@ -1287,7 +1290,7 @@ describe("QdrantVectorStore", () => {
 					exact: false,
 				},
 				with_payload: {
-					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 				},
 			})
 			expect(callArgs.filter).toEqual({
@@ -1326,7 +1329,7 @@ describe("QdrantVectorStore", () => {
 				score_threshold: DEFAULT_SEARCH_MIN_SCORE,
 				limit: DEFAULT_MAX_SEARCH_RESULTS,
 				params: { hnsw_ef: 128, exact: false },
-				with_payload: { include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"] },
+				with_payload: { include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"] },
 			})
 			expect(callArgs2.filter).toEqual({
 				must: [
@@ -1358,7 +1361,7 @@ describe("QdrantVectorStore", () => {
 					exact: false,
 				},
 				with_payload: {
-					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 				},
 			})
 			expect(callArgs3.filter).toEqual({
@@ -1385,7 +1388,7 @@ describe("QdrantVectorStore", () => {
 					exact: false,
 				},
 				with_payload: {
-					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 				},
 			})
 			expect(callArgs4.filter).toEqual({
@@ -1516,7 +1519,7 @@ describe("QdrantVectorStore", () => {
 					exact: false,
 				},
 				with_payload: {
-					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+					include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 				},
 			})
 			expect(callArgs5.filter).toEqual({
@@ -1590,7 +1593,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs7.filter).toEqual({
@@ -1619,7 +1622,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs6.filter).toEqual({
@@ -1646,7 +1649,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs8.filter).toEqual({
@@ -1673,7 +1676,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs9.filter).toEqual({
@@ -1700,7 +1703,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs10.filter).toEqual({
@@ -1727,7 +1730,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs11.filter).toEqual({
@@ -1760,7 +1763,7 @@ describe("QdrantVectorStore", () => {
 						exact: false,
 					},
 					with_payload: {
-						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments"],
+						include: ["filePath", "codeChunk", "startLine", "endLine", "pathSegments", "fileType"],
 					},
 				})
 				expect(callArgs12.filter).toEqual({
