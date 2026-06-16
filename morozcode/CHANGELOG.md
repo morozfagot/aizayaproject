@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.6
+
+### Features
+
+- **Add fileType to WS fragment logging for context ranking diagnostics**: `wsFragmentFiles` now logs objects `{ path, type }` instead of plain paths, where `type` is one of `code`, `config`, `doc`, `other` determined by file extension. Added `wsFragmentTypes` distribution counter (`{ code, config, doc, other }`). Added `fileType` field to `WorkspaceSearchFragment` interface and populated it from Qdrant payload in `workspaceSearch()`. This enables diagnosing WS ranking issues by showing the actual distribution of file types in search results. ([`Task.ts:24`](AiZayaProject/morozcode/src/core/task/Task.ts#L24), [`Task.ts:5533`](AiZayaProject/morozcode/src/core/task/Task.ts#L5533), [`sessionQdrant.ts:469`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L469), [`sessionQdrant.ts:566`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L566))
+
 ## 2.4.5
 
 ### Bug Fixes

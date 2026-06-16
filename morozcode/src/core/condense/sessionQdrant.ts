@@ -466,6 +466,7 @@ export interface WorkspaceSearchResult {
 
 export interface WorkspaceSearchFragment {
 	filePath: string
+	fileType: string
 	startLine: number
 	endLine: number
 	codeChunk: string
@@ -562,6 +563,7 @@ export async function workspaceSearch(
 
 		const fragments: WorkspaceSearchFragment[] = searchResults.map((r) => ({
 			filePath: r.payload?.filePath as string,
+			fileType: (r.payload?.fileType as string) || 'other',
 			startLine: r.payload?.startLine as number,
 			endLine: r.payload?.endLine as number,
 			codeChunk: r.payload?.codeChunk as string,

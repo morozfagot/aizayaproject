@@ -14,7 +14,23 @@ import EventEmitter from "events"
 
 import { AskIgnoredError } from "./AskIgnoredError"
 
-
+/**
+ * Определяет тип файла по расширению для ранжирования контекста.
+ * - code: исходный код (.ts, .js, .py, .go и т.д.)
+ * - config: конфигурационные файлы (.json, .yaml, .toml и т.д.)
+ * - doc: документация (.md, .txt, .rst и т.д.)
+ * - other: всё остальное
+ */
+export function getFileType(filePath: string): 'code' | 'config' | 'doc' | 'other' {
+	const ext = filePath.toLowerCase().split('.').pop() || ''
+	const codeExts = new Set(['ts', 'js', 'tsx', 'jsx', 'cs', 'py', 'java', 'go', 'rs', 'cpp', 'c', 'h', 'swift', 'kt', 'rb', 'php', 'scala', 'sh', 'bash', 'zsh', 'sql', 'css', 'scss', 'less', 'vue', 'svelte'])
+	const configExts = new Set(['json', 'yaml', 'yml', 'toml', 'xml', 'ini', 'env', 'cfg', 'conf', 'properties', 'lock'])
+	const docExts = new Set(['md', 'txt', 'rst', 'adoc', 'log'])
+	if (codeExts.has(ext)) return 'code'
+	if (configExts.has(ext)) return 'config'
+	if (docExts.has(ext)) return 'doc'
+	return 'other'
+}
 
 import { Anthropic } from "@anthropic-ai/sdk"
 
@@ -5510,15 +5526,21 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							`[Fragment ${idx + 1}] file=${f.filePath} lines=${f.startLine}-${f.endLine} score=${f.score.toFixed(3)}\n${f.codeChunk}`
 						)
 						const fullFragmentText = fragmentTexts.join("\n\n---\n\n")
+						const wsFragmentTypes = { code: 0, config: 0, doc: 0, other: 0 }
+						for (const f of wsResult.fragments) {
+							const t = getFileType(f.filePath)
+							wsFragmentTypes[t]++
+						}
 						await this.pipelineLogger.logStep("ws", "success", {
 							wsResultCount: wsResult.count,
 							wsError: wsResult.error || null,
 							embedderModelId: embedderModelId || "undefined",
 							usedFallback: fallbackUsed,
 							wsSearchQuery: wsSearchQuery.substring(0, 200),
-							wsFragmentFiles: wsResult.fragments.map(f => f.filePath),
+							wsFragmentFiles: wsResult.fragments.map(f => ({ path: f.filePath, type: getFileType(f.filePath) })),
 							wsFragmentScores: wsResult.fragments.map(f => f.score),
 							wsFragmentTexts: wsResult.fragments.map(f => f.codeChunk.substring(0, 500)),
+							wsFragmentTypes,
 						}, {
 							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, query="${wsSearchQuery.substring(0, 100)}"`,
 							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}\n\n${fullFragmentText}`,
