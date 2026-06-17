@@ -13,6 +13,34 @@ import { getModelDimension } from "../../shared/embeddingModels"
 
 const SESSION_COLLECTION_PREFIX = "session_"
 
+// ─── RRR Types ─────────────────────────────────────────────────────────────────
+
+export interface RrrChunk {
+	chunkId: string
+	text: string
+	score: number
+	messageTs: number
+}
+
+export interface RrrDiagnostics {
+	findChunksResult: string[]
+	extractedTsCount: number
+	reasonForEmpty?: string
+}
+
+export interface RrrResult {
+	chunks: RrrChunk[]
+	relevantTs: Set<number>
+	enrichedContext: boolean
+	diagnostics: RrrDiagnostics
+}
+
+export interface WsQuery {
+	systemPrompt: string
+	userPrompt: string
+	rrrResult: RrrResult | null
+}
+
 /**
  * Normalize workspace path for consistent collection naming.
  * Converts to lowercase, replaces path separators and special chars with dashes.
@@ -240,9 +268,9 @@ export async function rrrSearch(
 	maxIterations: number = 3,
 	fragmentsPerIteration: number = 3,
 	scoreThreshold: number = 0.0,
-): Promise<{ messageTsSet: Set<string>; chunkIds: string[] }> {
-	const messageTsSet = new Set<string>()
-	const chunkIds: string[] = []
+): Promise<RrrResult> {
+	const messageTsSet = new Set<number>()
+	const chunks: RrrChunk[] = []
 	const seenChunkIds = new Set<string>()
 	let currentVector = await embedFunction(queryText)
 	const seenIds = new Set<string>()
@@ -275,13 +303,23 @@ export async function rrrSearch(
 			if (uniqueId && !seenIds.has(uniqueId)) {
 				seenIds.add(uniqueId)
 				foundNew = true
-				if (messageTs) messageTsSet.add(messageTs)
+				if (messageTs) {
+					const tsNum = Number(messageTs)
+					if (!isNaN(tsNum)) {
+						messageTsSet.add(tsNum)
+					}
+				}
 			}
 
-			// Collect unique chunk IDs for diagnostics
+			// Collect unique chunks for RrrResult
 			if (chunkId && !seenChunkIds.has(chunkId)) {
 				seenChunkIds.add(chunkId)
-				chunkIds.push(chunkId)
+				chunks.push({
+					chunkId,
+					text: (payload.text as string) || "",
+					score: result.score,
+					messageTs: messageTs ? Number(messageTs) : 0,
+				})
 			}
 
 			// Try to embed the fragment text to refine the query vector
@@ -304,9 +342,17 @@ export async function rrrSearch(
 		currentVector = averageVectors(newVectors)
 	}
 
-	console.log(`[rrrSearch] RRR cycle complete: ${messageTsSet.size} unique messageTs, ${chunkIds.length} unique chunkIds`)
+	console.log(`[rrrSearch] RRR cycle complete: ${messageTsSet.size} unique messageTs, ${chunks.length} chunks`)
 
-	return { messageTsSet, chunkIds }
+	return {
+		chunks,
+		relevantTs: messageTsSet,
+		enrichedContext: messageTsSet.size > 0,
+		diagnostics: {
+			findChunksResult: chunks.map((c) => c.chunkId),
+			extractedTsCount: messageTsSet.size,
+		},
+	}
 }
 
 /**

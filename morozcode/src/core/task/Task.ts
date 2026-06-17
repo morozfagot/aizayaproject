@@ -1,4 +1,4 @@
-﻿﻿import * as path from "path"
+import * as path from "path"
 
 import * as vscode from "vscode"
 
@@ -282,7 +282,7 @@ import {
 
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
 
-import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithVectorSearch, isQdrantConfigured, workspaceSearch, type WorkspaceSearchResult, type WorkspaceSearchStats } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, getEffectiveApiHistory, getEffectiveApiHistoryWithVectorSearch, isQdrantConfigured, workspaceSearch, type WorkspaceSearchResult, type WorkspaceSearchStats, type RrrResult } from "../condense"
 
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
@@ -663,14 +663,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * Set in recursivelyMakeClineRequests() after successful RRR enrichment.
 	 * Used in attemptApiRequest() to report enrichedContext in pipeline logs.
 	 */
-	private _rrrResult: {
-		messages: ApiMessage[]
-		diagnostics: {
-			findChunksResult: string[]
-			extractedTsCount: number
-			reasonForEmpty?: string
-		}
-	} | undefined = undefined
+	private _rrrResult: RrrResult | undefined = undefined
 
 	/**
 	 * Workspace context from vector search enrichment.
@@ -5414,42 +5407,42 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 					try {
 
-						const enrichmentResult = await getEffectiveApiHistoryWithVectorSearch(
-
-							this.apiConversationHistory,
-
-							userTextContent,
-
-							this.taskId,
-
-							this.globalStoragePath,
-
-							0.0,
-
-							embedderApiKey,
-
-						)
-
-						// Save RRR result for pipeline logging
-						this._rrrResult = enrichmentResult
-
-						if (enrichmentResult.messages.length > 0) {
-
-							this.apiConversationHistory = [
-
-								...enrichmentResult.messages,
-
-								...this.apiConversationHistory,
-
-							]
-
-							console.log(
-
-								`[Task#${this.taskId}] RRR enrichment: ${enrichmentResult.messages.length} messages, ${enrichmentResult.diagnostics.extractedTsCount} unique Ts`,
-
+						const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
+	
+								this.apiConversationHistory,
+	
+								userTextContent,
+	
+								this.taskId,
+	
+								this.globalStoragePath,
+	
+								0.0,
+	
+								embedderApiKey,
+	
 							)
-
-						}
+	
+							// Save RRR result for pipeline logging
+							this._rrrResult = rrrResult
+	
+							if (rrrMessages.length > 0) {
+	
+								this.apiConversationHistory = [
+	
+									...rrrMessages,
+	
+									...this.apiConversationHistory,
+	
+								]
+	
+								console.log(
+	
+									`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts`,
+	
+								)
+	
+							}
 
 					} catch (error) {
 
@@ -5474,10 +5467,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Enrich WS query with RRR result (session history context)
 				let wsRrrContextUsed = false
 				let wsRrrContextLength = 0
-				if (this._rrrResult && this._rrrResult.messages.length > 0) {
-					const rrrContextText = this._rrrResult.messages
-						.filter((m: any) => typeof m.content === 'string')
-						.map((m: any) => m.content)
+				if (this._rrrResult && this._rrrResult.enrichedContext) {
+					const rrrContextText = this._rrrResult.chunks
+						.map((c: any) => c.text)
+						
 						.join('\n')
 						.substring(0, 1000) // Limit RRR context length
 					if (rrrContextText.length > 0) {
@@ -8853,7 +8846,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Here we just use standard effective history filtering (condense/truncate).
 		const rrrDiagnostics = this._rrrResult?.diagnostics
 		const hasWorkspaceContext = !!(this._workspaceContext && this._workspaceContext.trim().length > 0)
-		const enrichedContext = !!(this._rrrResult && this._rrrResult.messages.length > 0) || hasWorkspaceContext
+		const enrichedContext = !!(this._rrrResult && this._rrrResult.enrichedContext) || hasWorkspaceContext
 		const tagMatchDetails: Record<string, number> = {}
 		effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
 

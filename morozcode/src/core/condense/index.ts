@@ -24,6 +24,7 @@ import {
 	createDirectEmbedder,
 	isQdrantConfigured,
 	workspaceSearch,
+	type RrrResult,
 } from "./sessionQdrant"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
@@ -734,21 +735,22 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	embedderApiKey?: string,
 ): Promise<{
 	messages: ApiMessage[];
-	diagnostics: {
-		findChunksResult: string[];
-		extractedTsCount: number;
-		reasonForEmpty?: string;
-	};
+	rrrResult: RrrResult;
 }> {
 	try {
 		// GUARD: Check Qdrant is explicitly configured (not default localhost)
 		if (!isQdrantConfigured()) {
 			return {
 				messages: [],
-				diagnostics: {
-					findChunksResult: [],
-					extractedTsCount: 0,
-					reasonForEmpty: "Qdrant not configured (default localhost)",
+				rrrResult: {
+					chunks: [],
+					relevantTs: new Set<number>(),
+					enrichedContext: false,
+					diagnostics: {
+						findChunksResult: [],
+						extractedTsCount: 0,
+						reasonForEmpty: "Qdrant not configured (default localhost)",
+					},
 				},
 			}
 		}
@@ -757,10 +759,15 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		if (!queryText || queryText.trim().length === 0) {
 			return {
 				messages: [],
-				diagnostics: {
-					findChunksResult: [],
-					extractedTsCount: 0,
-					reasonForEmpty: "Empty query text, skipping RRR",
+				rrrResult: {
+					chunks: [],
+					relevantTs: new Set<number>(),
+					enrichedContext: false,
+					diagnostics: {
+						findChunksResult: [],
+						extractedTsCount: 0,
+						reasonForEmpty: "Empty query text, skipping RRR",
+					},
 				},
 			}
 		}
@@ -770,10 +777,15 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		if (!embeddingModelId) {
 			return {
 				messages: [],
-				diagnostics: {
-					findChunksResult: [],
-					extractedTsCount: 0,
-					reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model).",
+				rrrResult: {
+					chunks: [],
+					relevantTs: new Set<number>(),
+					enrichedContext: false,
+					diagnostics: {
+						findChunksResult: [],
+						extractedTsCount: 0,
+						reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model).",
+					},
 				},
 			}
 		}
@@ -789,10 +801,15 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		if (!apiKey) {
 			return {
 				messages: [],
-				diagnostics: {
-					findChunksResult: [],
-					extractedTsCount: 0,
-					reasonForEmpty: "No embedder API key available",
+				rrrResult: {
+					chunks: [],
+					relevantTs: new Set<number>(),
+					enrichedContext: false,
+					diagnostics: {
+						findChunksResult: [],
+						extractedTsCount: 0,
+						reasonForEmpty: "No embedder API key available",
+					},
 				},
 			}
 		}
@@ -820,37 +837,40 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			3, // fragmentsPerIteration
 			threshold, // scoreThreshold
 		)
-		const { messageTsSet, chunkIds } = rrrResult
 
-		if (messageTsSet.size === 0) {
+		if (rrrResult.relevantTs.size === 0) {
 			return {
 				messages: [],
-				diagnostics: {
-					findChunksResult: [],
-					extractedTsCount: 0,
-					reasonForEmpty: "RRR found no relevant fragments (messageTsSet empty after RRR cycle)",
+				rrrResult: {
+					...rrrResult,
+					diagnostics: {
+						...rrrResult.diagnostics,
+						reasonForEmpty: "RRR found no relevant fragments (relevantTs empty after RRR cycle)",
+					},
 				},
 			}
 		}
 
 		// Filter messages by found messageTs
-		const filtered = messages.filter((msg) => msg.ts != null && messageTsSet.has(String(msg.ts)))
+		const filtered = messages.filter((msg) => msg.ts != null && rrrResult.relevantTs.has(msg.ts))
 
 		return {
 			messages: filtered,
-			diagnostics: {
-				findChunksResult: chunkIds,
-				extractedTsCount: messageTsSet.size,
-			},
+			rrrResult,
 		}
 	} catch (error) {
 		console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
 		return {
 			messages: [],
-			diagnostics: {
-				findChunksResult: [],
-				extractedTsCount: 0,
-				reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
+			rrrResult: {
+				chunks: [],
+				relevantTs: new Set<number>(),
+				enrichedContext: false,
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
+				},
 			},
 		}
 	}
@@ -858,4 +878,4 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 
 
 export { isQdrantConfigured, workspaceSearch, DEFAULT_FILE_TYPE_WEIGHTS } from "./sessionQdrant"
-export type { WorkspaceSearchResult, WorkspaceSearchStats, FileTypeWeights } from "./sessionQdrant"
+export type { WorkspaceSearchResult, WorkspaceSearchStats, FileTypeWeights, RrrResult, RrrChunk, RrrDiagnostics, WsQuery } from "./sessionQdrant"

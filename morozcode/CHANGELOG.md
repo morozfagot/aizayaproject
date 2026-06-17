@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.12
+
+### Features
+
+- **Define RRR↔WS interface contract**: Added explicit interfaces `RrrResult`, `RrrChunk`, `RrrDiagnostics`, `WsQuery` in `sessionQdrant.ts`. Updated `rrrSearch()` return type from `{ messageTsSet, chunkIds }` to `RrrResult`. Updated `getEffectiveApiHistoryWithVectorSearch()` return type to include `rrrResult: RrrResult`. Updated `this._rrrResult` type in `Task.ts` from inline type to `RrrResult`. Updated all usages: `enrichmentResult.messages` → destructured `{ messages, rrrResult }`, `_rrrResult.messages` → `_rrrResult.chunks` / `_rrrResult.enrichedContext`. Exported all new interfaces from `condense/index.ts`. This establishes a clear contract between RRR and WS components with one-way dependency (WS depends on RRR, not vice versa). ([`sessionQdrant.ts:15`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L15), [`sessionQdrant.ts:33`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L33), [`condense/index.ts:870`](AiZayaProject/morozcode/src/core/condense/index.ts#L870), [`Task.ts:666`](AiZayaProject/morozcode/src/core/task/Task.ts#L666), [`Task.ts:5410`](AiZayaProject/morozcode/src/core/task/Task.ts#L5410), [`Task.ts:5470`](AiZayaProject/morozcode/src/core/task/Task.ts#L5470), [`Task.ts:8849`](AiZayaProject/morozcode/src/core/task/Task.ts#L8849))
+
 ## 2.4.11
 
 ### Features
