@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.11
+
+### Features
+
+- **Enrich WS query with RRR session history context**: WS search query now includes RRR (session Qdrant) results for more relevant workspace search. After RRR enrichment, if `this._rrrResult` contains messages, they are appended to `wsSearchQuery` as `[Session History Context]` (limited to 1000 chars). Added `wsRrrContextUsed` (boolean) and `wsRrrContextLength` (number) fields to pipeline logger step "ws" for diagnostics. This ensures WS search benefits from session history context, improving code fragment relevance. ([`Task.ts:5475`](AiZayaProject/morozcode/src/core/task/Task.ts#L5475), [`Task.ts:5576`](AiZayaProject/morozcode/src/core/task/Task.ts#L5576))
+
 ## 2.4.9
 
 ### Features

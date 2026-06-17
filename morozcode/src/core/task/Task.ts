@@ -5470,6 +5470,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim()
 				}
 				let wsSearchQuery = stripEnvDetails(userTextContent)
+
+				// Enrich WS query with RRR result (session history context)
+				let wsRrrContextUsed = false
+				let wsRrrContextLength = 0
+				if (this._rrrResult && this._rrrResult.messages.length > 0) {
+					const rrrContextText = this._rrrResult.messages
+						.filter((m: any) => typeof m.content === 'string')
+						.map((m: any) => m.content)
+						.join('\n')
+						.substring(0, 1000) // Limit RRR context length
+					if (rrrContextText.length > 0) {
+						wsSearchQuery = `${wsSearchQuery}\n\n[Session History Context]: ${rrrContextText}`
+						wsRrrContextUsed = true
+						wsRrrContextLength = rrrContextText.length
+					}
+				}
 				let fallbackUsed = false
 				if (wsSearchQuery.length === 0) {
 					// Fallback: collect text from last N user messages in conversation history, stripping env details
@@ -5556,8 +5572,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsFragmentTypes,
 							wsAppliedWeights: wsFileTypeWeights ?? { code: 1.0, config: 0.8, doc: 0.6, other: 0.4 },
 							wsStats: wsResult.stats ?? null,
+							wsRrrContextUsed,
+							wsRrrContextLength,
 						}, {
-							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, query="${wsSearchQuery.substring(0, 100)}"`,
+							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, rrrContextUsed=${wsRrrContextUsed}, rrrContextLen=${wsRrrContextLength}, query="${wsSearchQuery.substring(0, 100)}"`,
 							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}${wsResult.stats ? `\nWS_STATS: ${JSON.stringify(wsResult.stats)}` : ""}\n\n${fullFragmentText}`,
 							modelUsed: "workspace-search",
 						})
