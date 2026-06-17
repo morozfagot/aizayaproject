@@ -8882,11 +8882,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			reasonForEmpty: rrrDiagnostics?.reasonForEmpty,
 
+			rrrChunksFound: this._rrrResult?.chunks.length ?? 0,
+
+			rrrRelevantTsCount: this._rrrResult?.relevantTs.size ?? 0,
+
+			rrrEnrichedContext: this._rrrResult?.enrichedContext ?? false,
+
+			rrrDurationMs: rrrDiagnostics?.rrrDurationMs,
+
 		}, {
 
 			originalRequest: `History: ${totalHistory} messages, vector search enabled`,
 
-			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}`,
+			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}, rrrChunks: ${this._rrrResult?.chunks.length ?? 0}`,
 
 			modelUsed: this.api.getModel().id,
 
@@ -9177,6 +9185,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				totalMessageSize: JSON.stringify(cleanConversationHistory).length,
 
+				rrrChunksFound: this._rrrResult?.chunks.length ?? 0,
+
+				rrrRelevantTsCount: this._rrrResult?.relevantTs.size ?? 0,
+
 			}, {
 
 				originalRequest: systemPrompt + (hasWorkspaceContext ? this._workspaceContext : ""),
@@ -9230,6 +9242,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					wsFragmentCount,
 	
 					totalMessageSize: JSON.stringify(cleanConversationHistory).length,
+
+				rrrChunksFound: this._rrrResult?.chunks.length ?? 0,
+
+				rrrRelevantTsCount: this._rrrResult?.relevantTs.size ?? 0,
 
 			}, {
 

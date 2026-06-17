@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.13
+
+### Features
+
+- **Add RRR metrics to pipeline logging**: Added `rrrChunksFound`, `rrrRelevantTsCount`, `rrrEnrichedContext`, and `rrrDurationMs` metrics to pipeline logger step 3 (history filtering) and step 4 (first chunk success/error). Added `rrrDurationMs` field to `RrrDiagnostics` interface in `sessionQdrant.ts`. Added timing measurement in `getEffectiveApiHistoryWithVectorSearch()` — wraps `rrrSearch()` call with `Date.now()` to measure RRR cycle duration. This enables verification that RRR enrichment is working: `enrichedContext: true`, `rrrChunksFound > 0`, `rrrDurationMs < 500`. ([`Task.ts:8861`](AiZayaProject/morozcode/src/core/task/Task.ts#L8861), [`Task.ts:9166`](AiZayaProject/morozcode/src/core/task/Task.ts#L9166), [`Task.ts:9220`](AiZayaProject/morozcode/src/core/task/Task.ts#L9220), [`sessionQdrant.ts:25`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L25), [`condense/index.ts:740`](AiZayaProject/morozcode/src/core/condense/index.ts#L740))
+
 ## 2.4.12
 
 ### Features

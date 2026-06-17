@@ -26,6 +26,7 @@ export interface RrrDiagnostics {
 	findChunksResult: string[]
 	extractedTsCount: number
 	reasonForEmpty?: string
+	rrrDurationMs?: number
 }
 
 export interface RrrResult {

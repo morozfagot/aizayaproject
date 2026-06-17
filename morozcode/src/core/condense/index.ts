@@ -737,6 +737,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	messages: ApiMessage[];
 	rrrResult: RrrResult;
 }> {
+	const rrrStartTime = Date.now()
 	try {
 		// GUARD: Check Qdrant is explicitly configured (not default localhost)
 		if (!isQdrantConfigured()) {
@@ -826,7 +827,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			qdrantConfig.apiKey,
 		)
 
-		// Run RRR cycle
 		const rrrResult = await rrrSearch(
 			embedFunction,
 			client,
@@ -837,14 +837,24 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			3, // fragmentsPerIteration
 			threshold, // scoreThreshold
 		)
+		const rrrDurationMs = Date.now() - rrrStartTime
 
-		if (rrrResult.relevantTs.size === 0) {
+		// Attach timing to diagnostics
+		const rrrResultWithTiming: RrrResult = {
+			...rrrResult,
+			diagnostics: {
+				...rrrResult.diagnostics,
+				rrrDurationMs,
+			},
+		}
+
+		if (rrrResultWithTiming.relevantTs.size === 0) {
 			return {
 				messages: [],
 				rrrResult: {
-					...rrrResult,
+					...rrrResultWithTiming,
 					diagnostics: {
-						...rrrResult.diagnostics,
+						...rrrResultWithTiming.diagnostics,
 						reasonForEmpty: "RRR found no relevant fragments (relevantTs empty after RRR cycle)",
 					},
 				},
@@ -852,13 +862,14 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		}
 
 		// Filter messages by found messageTs
-		const filtered = messages.filter((msg) => msg.ts != null && rrrResult.relevantTs.has(msg.ts))
+		const filtered = messages.filter((msg) => msg.ts != null && rrrResultWithTiming.relevantTs.has(msg.ts))
 
 		return {
 			messages: filtered,
-			rrrResult,
+			rrrResult: rrrResultWithTiming,
 		}
 	} catch (error) {
+		const rrrDurationMs = Date.now() - rrrStartTime
 		console.error("[getEffectiveApiHistoryWithVectorSearch] RRR cycle failed:", error)
 		return {
 			messages: [],
@@ -870,6 +881,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 					findChunksResult: [],
 					extractedTsCount: 0,
 					reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
+					rrrDurationMs,
 				},
 			},
 		}
