@@ -1,5 +1,11 @@
 # Morozcode Changelog
 
+## 2.4.14
+
+### Bug Fixes
+
+- **Sync embedding model between WS and RRR**: RRR now uses the same embedding model source as WS — `this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()` (globalState) instead of `vscode.workspace.getConfiguration("roo-code.codebaseIndex").get("embeddingModelId")` (settings.json). Added `embedderModelId?: string` parameter to `getEffectiveApiHistoryWithVectorSearch()` in `condense/index.ts`. The parameter is passed from `Task.ts` before the RRR call, ensuring both WS and RRR use the same model source. This fixes the issue where RRR returned `enrichedContext: false` when model was configured via UI but not in settings.json. ([`condense/index.ts:729`](AiZayaProject/morozcode/src/core/condense/index.ts#L729), [`condense/index.ts:777`](AiZayaProject/morozcode/src/core/condense/index.ts#L777), [`Task.ts:5406`](AiZayaProject/morozcode/src/core/task/Task.ts#L5406))
+
 ## 2.4.13
 
 ### Features

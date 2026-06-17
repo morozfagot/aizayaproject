@@ -733,6 +733,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	globalStoragePath: string,
 	threshold: number = 0.0,
 	embedderApiKey?: string,
+	embedderModelId?: string,
 ): Promise<{
 	messages: ApiMessage[];
 	rrrResult: RrrResult;
@@ -774,7 +775,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		}
 
 		// Early check: embedding model must be configured
-		const embeddingModelId = getEmbeddingModelId()
+		const embeddingModelId = embedderModelId || getEmbeddingModelId()
 		if (!embeddingModelId) {
 			return {
 				messages: [],

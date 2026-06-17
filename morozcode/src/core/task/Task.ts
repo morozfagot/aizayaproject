@@ -5403,24 +5403,21 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const embedderApiKey = this.apiConfiguration?.openRouterApiKey || this.apiConfiguration?.apiKey || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || undefined
 				console.log(`[Task#${this.taskId}] RRR debug: apiConfig=${!!this.apiConfiguration}, openRouterKey=${!!this.apiConfiguration?.openRouterApiKey}, apiKey=${!!this.apiConfiguration?.apiKey}, envKey=${!!process.env.OPENROUTER_API_KEY}, resolved=${!!embedderApiKey}, apiConfigKeys=${Object.keys(this.apiConfiguration || {}).join(',')}`)
 
+				// Resolve embedder model ID from provider (globalState) - same as WS uses
+				const rrrEmbedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
+
 				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
 
 					try {
 
 						const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
-	
 								this.apiConversationHistory,
-	
 								userTextContent,
-	
 								this.taskId,
-	
 								this.globalStoragePath,
-	
 								0.0,
-	
 								embedderApiKey,
-	
+								rrrEmbedderModelId,
 							)
 	
 							// Save RRR result for pipeline logging
