@@ -71,7 +71,7 @@ export function getEmbeddingModelId(): string | undefined {
 	} catch {
 		// ignore
 	}
-	return process.env.EMBEDDING_MODEL_ID || undefined
+	return undefined
 }
 
 /**
@@ -119,7 +119,7 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 		const embedderProvider = getEmbedderProvider()
 		const modelId = getEmbeddingModelId()
 		if (!modelId) {
-			console.warn(`[sessionQdrant] No embedding model ID configured. Set roo-code.codebaseIndex.embeddingModelId or EMBEDDING_MODEL_ID.`)
+			console.warn(`[sessionQdrant] No embedding model ID configured. Set roo-code.codebaseIndex.embeddingModelId in VS Code settings (Roo Code → Code Indexing → Embedding Model).`)
 			return null
 		}
 		const dimension = getModelDimension(embedderProvider, modelId)
@@ -152,7 +152,14 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 export function createDirectEmbedder(apiKey?: string, baseUrl?: string, modelId?: string): { embedFunction: (text: string) => Promise<number[]> } {
 	const resolvedApiKey = apiKey || getEmbedderApiKey() || ""
 	const url = baseUrl || getEmbedderBaseUrl(getEmbedderProvider())
-	const model = modelId || getEmbeddingModelId() || "qwen/qwen3-embedding-8b"
+	const model = modelId || getEmbeddingModelId()
+	if (!model) {
+		throw new Error(
+			`[sessionQdrant] No embedding model ID configured. ` +
+			`Please enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model) ` +
+			`or set roo-code.codebaseIndex.embeddingModelId.`
+		)
+	}
 	const embedder = new OpenAICompatibleEmbedder(url, resolvedApiKey, model)
 	return {
 		embedFunction: async (text: string) => {
@@ -426,7 +433,8 @@ export function getVectorSize(): number {
 	if (!modelId) {
 		throw new Error(
 			`[sessionQdrant] No embedding model ID configured. ` +
-			`Please set roo-code.codebaseIndex.embeddingModelId in VS Code settings or EMBEDDING_MODEL_ID environment variable.`
+			`Please enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model) ` +
+			`or set roo-code.codebaseIndex.embeddingModelId.`
 		)
 	}
 	const dimension = getModelDimension(embedderProvider, modelId)
@@ -542,7 +550,7 @@ export async function workspaceSearch(
 			return {
 				fragments: [],
 				count: 0,
-				error: "No embedding model ID configured. Set the embedding model in Roo Code settings (Code Indexing → Embedding Model) or set EMBEDDING_MODEL_ID environment variable."
+				error: "No embedding model ID configured. Enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model)."
 			}
 		}
 		const baseUrl = getEmbedderBaseUrl(embedderProvider)

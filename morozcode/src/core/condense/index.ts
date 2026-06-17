@@ -765,6 +765,19 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			}
 		}
 
+		// Early check: embedding model must be configured
+		const embeddingModelId = getEmbeddingModelId()
+		if (!embeddingModelId) {
+			return {
+				messages: [],
+				diagnostics: {
+					findChunksResult: [],
+					extractedTsCount: 0,
+					reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model).",
+				},
+			}
+		}
+
 		// Get Qdrant config and vector size
 		const qdrantConfig = getQdrantConfig()
 		const vectorSize = getVectorSize()
