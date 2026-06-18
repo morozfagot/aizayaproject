@@ -182,7 +182,7 @@ export function createDirectEmbedder(apiKey?: string, baseUrl?: string, modelId?
 	const resolvedApiKey = apiKey || getEmbedderApiKey() || ""
 	const url = baseUrl || getEmbedderBaseUrl(getEmbedderProvider())
 	const model = modelId || getEmbeddingModelId()
-	if (!model) {
+	if (!model || model.trim() === "") {
 		throw new Error(
 			`[sessionQdrant] No embedding model ID configured. ` +
 			`Please enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model) ` +
@@ -259,6 +259,14 @@ export async function searchSimilarMessages(
 
 /**
  * RRR (Retrieve-Refine-Retrieve) iterative vector search.
+ *
+ * Algorithm:
+ * - Iteration 1: search by `queryText + systemPrompt`
+ * - Iteration 2: search by `queryText + systemPrompt + foundMessage1`
+ * - Iteration 3: search by `queryText + systemPrompt + foundMessage1 + foundMessage2`
+ *
+ * Each iteration embeds the concatenated text (not vector averaging).
+ * Only NEW unique messages from each iteration are added to the query for the next iteration.
  */
 export async function rrrSearch(
 	embedFunction: (text: string) => Promise<number[]>,
@@ -269,16 +277,27 @@ export async function rrrSearch(
 	maxIterations: number = 3,
 	fragmentsPerIteration: number = 3,
 	scoreThreshold: number = 0.0,
+	systemPrompt?: string,
 ): Promise<RrrResult> {
 	const messageTsSet = new Set<number>()
 	const chunks: RrrChunk[] = []
 	const seenChunkIds = new Set<string>()
-	let currentVector = await embedFunction(queryText)
 	const seenIds = new Set<string>()
+	
+	// Collect texts from found messages to append to query on each iteration
+	const foundMessageTexts: string[] = []
+	
+	// Build initial query: queryText + systemPrompt (if provided)
+	let currentQueryText = systemPrompt
+		? `${queryText}\n\n${systemPrompt}`
+		: queryText
 
-	console.log(`[rrrSearch] Starting RRR cycle: query="${queryText.substring(0, 100)}...", threshold=${scoreThreshold}, maxIter=${maxIterations}, limit=${fragmentsPerIteration}`)
+	console.log(`[rrrSearch] Starting RRR cycle: query="${currentQueryText.substring(0, 100)}...", threshold=${scoreThreshold}, maxIter=${maxIterations}, limit=${fragmentsPerIteration}, hasSystemPrompt=${!!systemPrompt}`)
 
 	for (let iter = 0; iter < maxIterations; iter++) {
+		// Embed the concatenated text for this iteration
+		const currentVector = await embedFunction(currentQueryText)
+		
 		const results = await searchWithFilter(client, collectionName, currentVector, taskId, scoreThreshold, fragmentsPerIteration)
 
 		console.log(`[rrrSearch] Iteration ${iter + 1}/${maxIterations}: found ${results.length} results`)
@@ -292,7 +311,6 @@ export async function rrrSearch(
 		const scores = results.map((r) => r.score.toFixed(4))
 		console.log(`[rrrSearch] Iteration ${iter + 1} scores: [${scores.join(", ")}]`)
 
-		const newVectors: number[][] = [currentVector]
 		let foundNew = false
 
 		for (const result of results) {
@@ -310,6 +328,11 @@ export async function rrrSearch(
 						messageTsSet.add(tsNum)
 					}
 				}
+				
+				// Collect the message text for the next iteration's query
+				if (payload.text && typeof payload.text === "string") {
+					foundMessageTexts.push(payload.text)
+				}
 			}
 
 			// Collect unique chunks for RrrResult
@@ -322,16 +345,6 @@ export async function rrrSearch(
 					messageTs: messageTs ? Number(messageTs) : 0,
 				})
 			}
-
-			// Try to embed the fragment text to refine the query vector
-			if (payload.text && typeof payload.text === "string") {
-				try {
-					const fragVector = await embedFunction(payload.text)
-					newVectors.push(fragVector)
-				} catch {
-					// Skip if embedding fails for a fragment
-				}
-			}
 		}
 
 		if (!foundNew) {
@@ -339,8 +352,12 @@ export async function rrrSearch(
 			break
 		}
 
-		// Refine: average current vector with fragment vectors
-		currentVector = averageVectors(newVectors)
+		// Build query for next iteration: queryText + systemPrompt + all found message texts
+		currentQueryText = systemPrompt
+			? `${queryText}\n\n${systemPrompt}\n\n${foundMessageTexts.join("\n\n")}`
+			: `${queryText}\n\n${foundMessageTexts.join("\n\n")}`
+		
+		console.log(`[rrrSearch] Next iteration query length: ${currentQueryText.length} chars, ${foundMessageTexts.length} found messages`)
 	}
 
 	console.log(`[rrrSearch] RRR cycle complete: ${messageTsSet.size} unique messageTs, ${chunks.length} chunks`)

@@ -5405,6 +5405,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				// Resolve embedder model ID from provider (globalState) - same as WS uses
 				const rrrEmbedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
+				const rrrProviderExists = !!this.providerRef.deref()
+
+				// Get system prompt for RRR iterative search (mode instructions, skills, etc.)
+				const systemPrompt = await this.getSystemPrompt()
 
 				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
 
@@ -5418,6 +5422,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								0.0,
 								embedderApiKey,
 								rrrEmbedderModelId,
+								systemPrompt,
 							)
 	
 							// Save RRR result for pipeline logging
@@ -7459,12 +7464,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 
 								const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
-
+	
 								const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
-
+								const embeddingModelId = config.get<string>("embeddingModelId")
+	
 								if (apiKey) {
-
-									const { embedFunction } = createDirectEmbedder(apiKey)
+	
+									const { embedFunction } = createDirectEmbedder(apiKey, undefined, embeddingModelId)
 
 									const texts = chunkResult.fragments.map((f) => f.summary || f.text)
 
