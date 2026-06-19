@@ -576,7 +576,7 @@ export async function workspaceSearch(
 	query: string,
 	workspacePath: string,
 	limit: number = 5,
-	minScore: number = 0.3,
+	minScore: number = 0.15,
 	embedderApiKey?: string,
 	embedderModelId?: string,
 	fileTypeWeights?: FileTypeWeights,
@@ -656,7 +656,20 @@ export async function workspaceSearch(
 			return { fragments: [], count: 0, error: "Workspace not indexed yet" }
 		}
 
-		const searchResults = await vectorStore.search(queryVector, undefined, minScore, limit)
+		// Search with expanded limit to allow for deduplication
+		// We request more results than needed since duplicates by filePath will be removed
+		const expandedLimit = Math.max(limit * 3, 15)
+		const searchResults = await vectorStore.search(queryVector, undefined, minScore, expandedLimit)
+
+		console.log(`[workspaceSearch] Qdrant returned ${searchResults.length} raw results (expandedLimit=${expandedLimit}, minScore=${minScore})`)
+		if (searchResults.length > 0) {
+			const typeCounts: Record<string, number> = {}
+			for (const r of searchResults) {
+				const ft = (r.payload?.fileType as string) || 'unknown'
+				typeCounts[ft] = (typeCounts[ft] || 0) + 1
+			}
+			console.log(`[workspaceSearch] Result types: ${JSON.stringify(typeCounts)}`)
+		}
 
 		// Build fragments with adjusted score based on file type weights
 		const fragments: WorkspaceSearchFragment[] = searchResults.map((r) => {
@@ -675,9 +688,23 @@ export async function workspaceSearch(
 			}
 		})
 
-		// Sort by adjusted score (descending) and take top-k
+		// Sort by adjusted score (descending)
 		fragments.sort((a, b) => (b.adjustedScore ?? 0) - (a.adjustedScore ?? 0))
-		const topFragments = fragments.slice(0, limit)
+
+		// Deduplicate by filePath — keep only the highest-scored fragment per file
+		const seenFilePaths = new Set<string>()
+		const dedupedFragments: WorkspaceSearchFragment[] = []
+		for (const fragment of fragments) {
+			if (fragment.filePath && !seenFilePaths.has(fragment.filePath)) {
+				seenFilePaths.add(fragment.filePath)
+				dedupedFragments.push(fragment)
+			}
+		}
+
+		// Take top-k after deduplication
+		const topFragments = dedupedFragments.slice(0, limit)
+
+		console.log(`[workspaceSearch] After dedup: ${dedupedFragments.length} unique files (from ${fragments.length} total), returning top ${limit}`)
 
 		// ─── Compute ranking statistics ───────────────────────────────────────
 		const typeDistribution = { code: 0, config: 0, doc: 0, other: 0 }

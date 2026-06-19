@@ -1,5 +1,17 @@
 ﻿# Morozcode Changelog
 
+## 2.4.19
+
+### Features
+
+- **Minimize Environment Details — remove full file listing**: Removed the full recursive workspace file listing from Environment Details (the `includeFileDetails` block in `getEnvironmentDetails.ts`). This was generating hundreds of lines of file paths (the "шлак"). Replaced with a compact Open Tabs section using `vscode.window.tabGroups.all` to show all open editor tabs. Environment Details is now < 1000 characters in typical usage. Removed unused imports (`os`, `listFiles`, `formatResponse`, `arePathsEqual`). ([`getEnvironmentDetails.ts`](AiZayaProject/morozcode/src/core/environment/getEnvironmentDetails.ts))
+
+## 2.4.18
+
+### Bug Fixes
+
+- **WS code indexing fix — deduplication and lower minScore**: Fixed `workspaceSearch()` in `sessionQdrant.ts` to deduplicate results by `filePath` — previously the same file could appear multiple times in WS results (e.g. `docs/session-tree.md` appeared twice with different scores). Added expanded search limit (3x requested limit, min 15) to compensate for deduplication. Lowered default `minScore` from `0.3` to `0.15` to allow code fragments (.ts, .js) which typically have lower similarity scores than markdown docs. Added diagnostic logging for raw Qdrant result count and type distribution. ([`sessionQdrant.ts:579`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L579), [`sessionQdrant.ts:662`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L662), [`sessionQdrant.ts:694`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L694))
+
 ## 2.4.17
 
 ### Features

@@ -1,5 +1,4 @@
 import path from "path"
-import os from "os"
 
 import * as vscode from "vscode"
 import pWaitFor from "p-wait-for"
@@ -10,11 +9,8 @@ import type { ExperimentId } from "@roo-code/types"
 import { formatLanguage } from "../../shared/language"
 import { defaultModeSlug, getFullModeDetails } from "../../shared/modes"
 import { getApiMetrics } from "../../shared/getApiMetrics"
-import { listFiles } from "../../services/glob/list-files"
 import { TerminalRegistry } from "../../integrations/terminal/TerminalRegistry"
 import { Terminal } from "../../integrations/terminal/Terminal"
-import { arePathsEqual } from "../../utils/path"
-import { formatResponse } from "../prompts/responses"
 import { getGitStatus } from "../../utils/git"
 
 import { Task } from "../task/Task"
@@ -201,41 +197,28 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 		language: language ?? formatLanguage(vscode.env.language),
 	})
 
+	// Add open tabs information.
+	const openTabs: string[] = []
+	for (const group of vscode.window.tabGroups.all) {
+		for (const tab of group.tabs) {
+			const label = typeof tab.input === "object" && tab.input !== null && "uri" in tab.input
+				? (tab.input as { uri: { fsPath: string } }).uri.fsPath
+				: tab.label
+			if (label) {
+				openTabs.push(path.relative(cline.cwd, label))
+			}
+		}
+	}
+
+	if (openTabs.length > 0) {
+		details += "\n\n# VSCode Open Tabs"
+		details += `\n${openTabs.join(",")}`
+	}
+
 	details += `\n\n# Current Mode\n`
 	details += `<slug>${currentMode}</slug>\n`
 	details += `<name>${modeDetails.name}</name>\n`
 	details += `<model>${modelId}</model>\n`
-
-	if (includeFileDetails) {
-		details += `\n\n# Current Workspace Directory (${cline.cwd.toPosix()}) Files\n`
-		const isDesktop = arePathsEqual(cline.cwd, path.join(os.homedir(), "Desktop"))
-
-		if (isDesktop) {
-			// Don't want to immediately access desktop since it would show
-			// permission popup.
-			details += "(Desktop files not shown automatically. Use list_files to explore if needed.)"
-		} else {
-			const maxFiles = maxWorkspaceFiles ?? 200
-
-			// Early return for limit of 0
-			if (maxFiles === 0) {
-				details += "(Workspace files context disabled. Use list_files to explore if needed.)"
-			} else {
-				const [files, didHitLimit] = await listFiles(cline.cwd, true, maxFiles)
-				const { showRooIgnoredFiles = false } = state ?? {}
-
-				const result = formatResponse.formatFilesList(
-					cline.cwd,
-					files,
-					didHitLimit,
-					cline.rooIgnoreController,
-					showRooIgnoredFiles,
-				)
-
-				details += result
-			}
-		}
-	}
 
 	const todoListEnabled =
 		state && typeof state.apiConfiguration?.todoListEnabled === "boolean"
