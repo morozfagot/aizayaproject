@@ -666,6 +666,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private _rrrResult: RrrResult | undefined = undefined
 
 	/**
+	 * RRR messages selected by vector search for API request.
+	 * Set in recursivelyMakeClineRequests() after successful RRR enrichment.
+	 * Used in attemptApiRequest() as the ONLY source of conversation history.
+	 * When set, replaces apiConversationHistory in API requests (2.9.15.7).
+	 */
+	private _rrrMessages: ApiMessage[] = []
+
+	/**
 	 * Workspace context from vector search enrichment.
 	 * Set in recursivelyMakeClineRequests() after successful WS search.
 	 * Used in attemptApiRequest() to report enrichedContext in pipeline logs.
@@ -5388,6 +5396,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Hybrid Relevance Pipeline: Enrich context via Qdrant RRR before API request
 				// Reset RRR result from previous request
 				this._rrrResult = undefined
+				this._rrrMessages = []
 
 				const userTextContent = currentUserContent
 
@@ -5429,22 +5438,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							this._rrrResult = rrrResult
 	
 							if (rrrMessages.length > 0) {
-	
-								this.apiConversationHistory = [
-	
-									...rrrMessages,
-	
-									...this.apiConversationHistory,
-	
-								]
-	
-								console.log(
-	
-									`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts`,
-	
-								)
-	
-							}
+		
+									// 2.9.15.7: Save RRR messages separately, DO NOT add to apiConversationHistory
+									// Conversation History is NOT sent to the model - only RRR messages are used
+									this._rrrMessages = rrrMessages
+		
+									console.log(
+		
+										`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts (NOT added to history)`,
+		
+									)
+		
+								}
 
 					} catch (error) {
 
@@ -8845,25 +8850,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		let effectiveHistory: ApiMessage[]
 
-		// RRR enrichment is done in recursivelyMakeClineRequests() before API request.
-		// Here we just use standard effective history filtering (condense/truncate).
+		// 2.9.15.7: Conversation History is NOT sent to the model.
+		// Only RRR messages (from vector search) are used as history context.
 		const rrrDiagnostics = this._rrrResult?.diagnostics
 		const hasWorkspaceContext = !!(this._workspaceContext && this._workspaceContext.trim().length > 0)
 		const enrichedContext = !!(this._rrrResult && this._rrrResult.enrichedContext) || hasWorkspaceContext
 		const tagMatchDetails: Record<string, number> = {}
-		effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+		effectiveHistory = this._rrrMessages // 2.9.15.7: Only RRR messages, NOT full conversation history
 
-
-
-
-		const totalHistory = this.apiConversationHistory.length
+		// 2.9.15.7: totalHistory = 0 since conversation history is NOT sent
+		const totalHistory = 0 // this.apiConversationHistory.length — NOT sent to model
 
 		const filteredCount = effectiveHistory.length
-		const requestSummary = `History: ${totalHistory} messages, filtered: ${totalHistory - filteredCount}, remaining: ${filteredCount}, enriched: ${enrichedContext}`
+		const requestSummary = `History: 0 messages sent (2.9.15.7), RRR: ${filteredCount}, enriched: ${enrichedContext}`
 
 		await this.pipelineLogger.logStep(3, "success", {
 
-			messagesFiltered: totalHistory - filteredCount,
+			// 2.9.15.7: messagesSent = 0 (conversation history NOT sent to model)
+			messagesSent: 0,
+			messagesFiltered: 0,
 
 			chunksFound: filteredCount,
 
@@ -8895,9 +8900,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		}, {
 
-			originalRequest: `History: ${totalHistory} messages, vector search enabled`,
+			originalRequest: `2.9.15.7: Conversation History NOT sent, RRR only`,
 
-			originalResponse: `Filtered history: ${filteredCount}/${totalHistory} messages, enriched: ${enrichedContext}, rrrChunks: ${this._rrrResult?.chunks.length ?? 0}`,
+			originalResponse: `RRR: ${filteredCount} messages sent, enriched: ${enrichedContext}, rrrChunks: ${this._rrrResult?.chunks.length ?? 0}`,
 
 			modelUsed: this.api.getModel().id,
 

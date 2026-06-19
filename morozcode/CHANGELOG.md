@@ -1,4 +1,17 @@
-# Morozcode Changelog
+﻿# Morozcode Changelog
+
+## 2.4.17
+
+### Features
+
+- **Disable Conversation History in API requests (2.9.15.7)**: Conversation History (`apiConversationHistory`) is NO LONGER sent to the model. Only RRR (vector-selected messages) and WS (vector-selected code) are used as context. Added `_rrrMessages` field to Task class to store RRR results separately from `apiConversationHistory`. Modified `attemptApiRequest()` to use `this._rrrMessages` instead of `getEffectiveApiHistory(this.apiConversationHistory)`. Modified `recursivelyMakeClineRequests()` to save RRR results to `_rrrMessages` instead of prepending to `apiConversationHistory`. Pipeline logger now reports `messagesSent: 0` for conversation history. This reduces context from 375KB to <20KB.
+
+## 2.4.15
+
+
+### Bug Fixes
+
+- **Pass embedding model ID to createDirectEmbedder in RRR cycle**: `createDirectEmbedder()` in `condense/index.ts` was called with only `apiKey` parameter, missing `modelId`. The `embeddingModelId` was already resolved on line 778 (`embedderModelId || getEmbeddingModelId()`) but never passed to the embedder constructor. Added `embeddingModelId` as third argument to `createDirectEmbedder(apiKey, undefined, embeddingModelId)`. This fixes the root cause of `enrichedContext: false` — without the model ID, `createDirectEmbedder` fell back to `getEmbeddingModelId()` which reads from settings.json (empty), causing `throw Error("[sessionQdrant] No embedding model ID configured")`. Also added diagnostic logging in `Task.ts` to track `rrrEmbedderModelId` resolution. ([`condense/index.ts:819`](AiZayaProject/morozcode/src/core/condense/index.ts#L819), [`Task.ts:5408`](AiZayaProject/morozcode/src/core/task/Task.ts#L5408))
 
 ## 2.4.14
 

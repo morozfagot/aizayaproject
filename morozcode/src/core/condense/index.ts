@@ -717,13 +717,20 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
 /**
  * Executes RRR (Retrieve-Refine-Retrieve) vector search cycle
  * for enriching context with relevant session history fragments.
- * Uses prompt text directly for vector similarity (no tags).
+ *
+ * Algorithm:
+ * - Iteration 1: search by queryText + systemPrompt
+ * - Iteration 2: search by queryText + systemPrompt + foundMessage1
+ * - Iteration 3: search by queryText + systemPrompt + foundMessage1 + foundMessage2
  *
  * @param messages - Full API message history
  * @param queryText - User prompt text for vector search
  * @param taskId - Task ID
  * @param globalStoragePath - Path to global storage
  * @param threshold - Relevance threshold (default 0.0, mapped to Qdrant score_threshold)
+ * @param embedderApiKey - API key for embedding service
+ * @param embedderModelId - Embedding model ID
+ * @param systemPrompt - System prompt (mode instructions, skills, etc.) to include in RRR query
  * @returns Object with filtered history and RRR diagnostics
  */
 export async function getEffectiveApiHistoryWithVectorSearch(
@@ -734,6 +741,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	threshold: number = 0.0,
 	embedderApiKey?: string,
 	embedderModelId?: string,
+	systemPrompt?: string,
 ): Promise<{
 	messages: ApiMessage[];
 	rrrResult: RrrResult;
@@ -816,7 +824,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			}
 		}
 
-		const embedderObj = createDirectEmbedder(apiKey)
+		const embedderObj = createDirectEmbedder(apiKey, undefined, embeddingModelId)
 		const embedFunction = embedderObj.embedFunction
 
 		// Create/get session collection
@@ -837,6 +845,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			3, // maxIterations
 			3, // fragmentsPerIteration
 			threshold, // scoreThreshold
+			systemPrompt, // system prompt for iterative query refinement
 		)
 		const rrrDurationMs = Date.now() - rrrStartTime
 
