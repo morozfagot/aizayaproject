@@ -5413,8 +5413,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				console.log(`[Task#${this.taskId}] RRR debug: apiConfig=${!!this.apiConfiguration}, openRouterKey=${!!this.apiConfiguration?.openRouterApiKey}, apiKey=${!!this.apiConfiguration?.apiKey}, envKey=${!!process.env.OPENROUTER_API_KEY}, resolved=${!!embedderApiKey}, apiConfigKeys=${Object.keys(this.apiConfiguration || {}).join(',')}`)
 
 				// Resolve embedder model ID from provider (globalState) - same as WS uses
-				const rrrEmbedderModelId = this.providerRef.deref()?.getCodebaseIndexEmbedderModelId?.()
-				const rrrProviderExists = !!this.providerRef.deref()
+				const rrrProvider = this.providerRef.deref()
+				const rrrProviderExists = !!rrrProvider
+				const rrrEmbedderModelId = rrrProvider?.getCodebaseIndexEmbedderModelId?.()
+				
+				console.log(`[Task#${this.taskId}] RRR modelId resolution: providerExists=${rrrProviderExists}, modelId=${rrrEmbedderModelId || 'UNDEFINED'}`)
 
 				// Get system prompt for RRR iterative search (mode instructions, skills, etc.)
 				const systemPrompt = await this.getSystemPrompt()

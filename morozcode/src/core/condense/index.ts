@@ -783,8 +783,10 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		}
 
 		// Early check: embedding model must be configured
-		const embeddingModelId = embedderModelId || getEmbeddingModelId()
-		if (!embeddingModelId) {
+		// NOTE: embedderModelId is passed from Task.ts via providerRef.getCodebaseIndexEmbedderModelId()
+		// which reads from globalState (where UI saves codebase indexing config).
+		// Do NOT fallback to getEmbeddingModelId() — it reads from settings.json which is NOT written by UI.
+		if (!embedderModelId) {
 			return {
 				messages: [],
 				rrrResult: {
@@ -794,7 +796,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 					diagnostics: {
 						findChunksResult: [],
 						extractedTsCount: 0,
-						reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model).",
+						reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code: Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
 					},
 				},
 			}
@@ -802,7 +804,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 
 		// Get Qdrant config and vector size
 		const qdrantConfig = getQdrantConfig()
-		const vectorSize = getVectorSize()
+		const vectorSize = getVectorSize(embedderModelId)
 
 		// Get embedder key: use provided key first, fallback to config/env resolution
 		console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
@@ -824,7 +826,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			}
 		}
 
-		const embedderObj = createDirectEmbedder(apiKey, undefined, embeddingModelId)
+		const embedderObj = createDirectEmbedder(apiKey, undefined, embedderModelId)
 		const embedFunction = embedderObj.embedFunction
 
 		// Create/get session collection

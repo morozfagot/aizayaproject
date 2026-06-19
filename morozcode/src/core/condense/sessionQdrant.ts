@@ -90,13 +90,33 @@ export function getEmbedderApiKey(): string | undefined {
 }
 
 /**
- * Get embedding model ID from VS Code config or environment.
+ * Get embedding model ID from globalState (where UI saves codebase indexing config).
+ * This reads from the same source as ClineProvider.getCodebaseIndexEmbedderModelId().
+ *
+ * NOTE: This requires vscode.ExtensionContext to access globalState.
+ * For contexts without context access, pass modelId explicitly.
+ */
+export function getEmbeddingModelIdFromGlobalState(context?: vscode.ExtensionContext): string | undefined {
+	if (!context) return undefined
+	try {
+		const config = context.globalState.get<{ codebaseIndexEmbedderModelId?: string }>("codebaseIndexConfig")
+		const modelId = config?.codebaseIndexEmbedderModelId
+		if (modelId && modelId.trim().length > 0) return modelId
+	} catch {
+		// ignore
+	}
+	return undefined
+}
+
+/**
+ * Get embedding model ID from VS Code settings.json (fallback).
+ * @deprecated Use getEmbeddingModelIdFromGlobalState() instead — UI writes to globalState, not settings.json.
  */
 export function getEmbeddingModelId(): string | undefined {
 	try {
 		const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
 		const modelId = config.get<string>("embeddingModelId")
-		if (modelId) return modelId
+		if (modelId && modelId.trim().length > 0) return modelId
 	} catch {
 		// ignore
 	}
@@ -176,17 +196,28 @@ export async function getEmbedderFromCodeIndex(context: vscode.ExtensionContext)
 
 /**
  * Create a direct OpenAI-compatible embedder for session embedding.
- * Uses environment-based configuration with VS Code config fallback.
+ * Resolves modelId from: explicit param > globalState > settings.json fallback.
+ *
+ * @param apiKey - API key for the embedder
+ * @param baseUrl - Base URL for the embedder API
+ * @param modelId - Explicit model ID (if provided, used directly)
+ * @param context - Optional ExtensionContext to read modelId from globalState
  */
-export function createDirectEmbedder(apiKey?: string, baseUrl?: string, modelId?: string): { embedFunction: (text: string) => Promise<number[]> } {
+export function createDirectEmbedder(
+	apiKey?: string,
+	baseUrl?: string,
+	modelId?: string,
+	context?: vscode.ExtensionContext,
+): { embedFunction: (text: string) => Promise<number[]> } {
 	const resolvedApiKey = apiKey || getEmbedderApiKey() || ""
 	const url = baseUrl || getEmbedderBaseUrl(getEmbedderProvider())
-	const model = modelId || getEmbeddingModelId()
+	const model = modelId || getEmbeddingModelIdFromGlobalState(context) || getEmbeddingModelId()
 	if (!model || model.trim() === "") {
 		throw new Error(
 			`[sessionQdrant] No embedding model ID configured. ` +
-			`Please enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model) ` +
-			`or set roo-code.codebaseIndex.embeddingModelId.`
+			`Please enable codebase indexing in VS Code: ` +
+			`Roo Code → Code Indexing → choose an Embedding Model, then click "Save & Index". ` +
+			`Alternatively set roo-code.codebaseIndex.embeddingModelId in VS Code settings.json.`
 		)
 	}
 	const embedder = new OpenAICompatibleEmbedder(url, resolvedApiKey, model)
@@ -489,22 +520,27 @@ export function getQdrantConfig(): { url: string; apiKey?: string } {
 }
 
 /**
- * Get embedding vector dimension from VS Code settings.
+ * Get embedding vector dimension for a given modelId.
+ * Throws with actionable error message if modelId is missing or dimension unknown.
+ *
+ * @param modelId - The embedding model ID (e.g. "openai/text-embedding-3-small")
+ * @param context - Optional ExtensionContext to read from globalState if modelId not provided
  */
-export function getVectorSize(): number {
+export function getVectorSize(modelId?: string, context?: vscode.ExtensionContext): number {
 	const embedderProvider = getEmbedderProvider()
-	const modelId = getEmbeddingModelId()
-	if (!modelId) {
+	const resolvedModelId = modelId || getEmbeddingModelIdFromGlobalState(context) || getEmbeddingModelId()
+	if (!resolvedModelId) {
 		throw new Error(
 			`[sessionQdrant] No embedding model ID configured. ` +
-			`Please enable codebase indexing in VS Code settings (Roo Code → Code Indexing → Embedding Model) ` +
-			`or set roo-code.codebaseIndex.embeddingModelId.`
+			`Please enable codebase indexing in VS Code: ` +
+			`Roo Code → Code Indexing → choose an Embedding Model, then click "Save & Index". ` +
+			`Alternatively set roo-code.codebaseIndex.embeddingModelId in VS Code settings.json.`
 		)
 	}
-	const dimension = getModelDimension(embedderProvider, modelId)
+	const dimension = getModelDimension(embedderProvider, resolvedModelId)
 	if (!dimension) {
 		throw new Error(
-			`[sessionQdrant] Cannot determine vector dimension for provider="${embedderProvider}", modelId="${modelId}". ` +
+			`[sessionQdrant] Cannot determine vector dimension for provider="${embedderProvider}", modelId="${resolvedModelId}". ` +
 			`Please check that the model is supported or set roo-code.codebaseIndex.embeddingModelDimension manually.`
 		)
 	}

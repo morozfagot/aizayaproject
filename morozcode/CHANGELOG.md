@@ -1,5 +1,11 @@
 ﻿# Morozcode Changelog
 
+## 2.4.20
+
+### Bug Fixes
+
+- **RRR embedding model ID — read from globalState instead of settings.json**: Fixed root cause of `rrrChunksFound: 0` / `enrichedContext: false`. The `getEmbeddingModelId()` function in `sessionQdrant.ts` was reading from `vscode.workspace.getConfiguration("roo-code.codebaseIndex")` (settings.json), but the UI writes the embedding model ID to `globalState("codebaseIndexConfig")`. Added `getEmbeddingModelIdFromGlobalState()` that reads from the correct source. Updated `getVectorSize()` to accept `modelId` parameter instead of calling `getEmbeddingModelId()` internally. Removed fallback to `getEmbeddingModelId()` in `index.ts` — now uses only the `embedderModelId` passed from `Task.ts` via `providerRef.getCodebaseIndexEmbedderModelId()`. Added diagnostic logging in `Task.ts` to track providerRef resolution. Error message now includes actionable instructions: "Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'". ([`sessionQdrant.ts:92`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L92), [`sessionQdrant.ts:514`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L514), [`condense/index.ts:785`](AiZayaProject/morozcode/src/core/condense/index.ts#L785), [`Task.ts:5416`](AiZayaProject/morozcode/src/core/task/Task.ts#L5416))
+
 ## 2.4.19
 
 ### Features
