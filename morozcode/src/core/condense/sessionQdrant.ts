@@ -34,6 +34,7 @@ export interface RrrResult {
 	relevantTs: Set<number>
 	enrichedContext: boolean
 	diagnostics: RrrDiagnostics
+	queryText: string
 }
 
 export interface WsQuery {
@@ -401,6 +402,7 @@ export async function rrrSearch(
 			findChunksResult: chunks.map((c) => c.chunkId),
 			extractedTsCount: messageTsSet.size,
 		},
+		queryText,
 	}
 }
 

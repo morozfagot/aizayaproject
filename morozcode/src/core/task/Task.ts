@@ -5468,57 +5468,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const wsGuardQdrant = isQdrantConfigured()
 				const wsGuardCwd = !!this.cwd
 
-				// Build search query: strip environment_details, use user text, fallback to last informative messages
-				const stripEnvDetails = (text: string): string => {
-					return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim()
-				}
-				let wsSearchQuery = stripEnvDetails(userTextContent)
-
-				// Enrich WS query with RRR result (session history context)
-				let wsRrrContextUsed = false
-				let wsRrrContextLength = 0
-				if (this._rrrResult && this._rrrResult.enrichedContext) {
-					const rrrContextText = this._rrrResult.chunks
-						.map((c: any) => c.text)
-						
-						.join('\n')
-						.substring(0, 1000) // Limit RRR context length
-					if (rrrContextText.length > 0) {
-						wsSearchQuery = `${wsSearchQuery}\n\n[Session History Context]: ${rrrContextText}`
-						wsRrrContextUsed = true
-						wsRrrContextLength = rrrContextText.length
+				// Build WS query from RrrResult (always contains queryText, may contain chunks)
+				let wsSearchQuery = ""
+				let wsQuerySource = "none"
+				if (this._rrrResult) {
+					const parts: string[] = [this._rrrResult.queryText]
+					if (this._rrrResult.chunks.length > 0) {
+						parts.push(this._rrrResult.chunks.map((c: any) => c.text).join('\n'))
+						wsQuerySource = "rrr-queryText+chunks"
+					} else {
+						wsQuerySource = "rrr-queryText"
 					}
-				}
-				let fallbackUsed = false
-				if (wsSearchQuery.length === 0) {
-					// Fallback: collect text from last N user messages in conversation history, stripping env details
-					fallbackUsed = true
-					const MAX_FALLBACK_MESSAGES = 3
-					const MAX_QUERY_LENGTH = 2000
-					const fallbackTexts: string[] = []
-					const history = this.apiConversationHistory || []
-					for (let i = history.length - 1; i >= 0 && fallbackTexts.length < MAX_FALLBACK_MESSAGES; i--) {
-						const msg = history[i]
-						if (msg.role !== "user") continue
-						let text = ""
-						if (typeof msg.content === "string") {
-							text = msg.content
-						} else if (Array.isArray(msg.content)) {
-							text = msg.content
-								.filter((b: any) => b.type === "text")
-								.map((b: any) => b.text)
-								.join("\n")
-						}
-						const stripped = stripEnvDetails(text)
-						if (stripped.length > 0) {
-							fallbackTexts.unshift(stripped)
-						}
-					}
-					wsSearchQuery = fallbackTexts.join("\n\n").substring(0, MAX_QUERY_LENGTH)
-				}
-				// Final safety: limit query length to avoid embedding failures
-				if (wsSearchQuery.length > 2000) {
-					wsSearchQuery = wsSearchQuery.substring(0, 2000)
+					wsSearchQuery = parts.join('\n\n').substring(0, 2000)
 				}
 	
 				const wsGuardPassed = wsGuardQdrant && wsGuardCwd && wsSearchQuery.length > 0
@@ -5566,7 +5527,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsResultCount: wsResult.count,
 							wsError: wsResult.error || null,
 							embedderModelId: embedderModelId || "undefined",
-							usedFallback: fallbackUsed,
+							wsQuerySource,
 							wsSearchQuery: wsSearchQuery.substring(0, 200),
 							wsFragmentFiles: wsResult.fragments.map(f => ({ path: f.filePath, type: getFileType(f.filePath) })),
 							wsFragmentScores: wsResult.fragments.map(f => f.score),
@@ -5575,10 +5536,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							wsFragmentTypes,
 							wsAppliedWeights: wsFileTypeWeights ?? { code: 1.0, config: 0.8, doc: 0.6, other: 0.4 },
 							wsStats: wsResult.stats ?? null,
-							wsRrrContextUsed,
-							wsRrrContextLength,
 						}, {
-							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, rrrContextUsed=${wsRrrContextUsed}, rrrContextLen=${wsRrrContextLength}, query="${wsSearchQuery.substring(0, 100)}"`,
+							originalRequest: `WS: qdrant=${wsGuardQdrant}, cwd=${wsGuardCwd}, modelId=${embedderModelId || "none"}, queryLen=${wsSearchQuery.length}, querySource=${wsQuerySource}, query="${wsSearchQuery.substring(0, 100)}"`,
 							originalResponse: `WS: found=${wsResult.count}, error=${wsResult.error || "none"}${wsResult.stats ? `\nWS_STATS: ${JSON.stringify(wsResult.stats)}` : ""}\n\n${fullFragmentText}`,
 							modelUsed: "workspace-search",
 						})

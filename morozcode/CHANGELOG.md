@@ -1,5 +1,11 @@
 ﻿# Morozcode Changelog
 
+## 2.4.21
+
+### Features
+
+- **WS query uses RrrResult queryText + chunks**: WS search query now always includes the RRR queryText (userTextContent + systemPrompt) as the base, with RRR chunks appended when found. Previously, WS query was built from raw userTextContent and enriched with chunks as a separate `[Session History Context]` block. Now the RrrResult object is the single source of truth — `queryText` is always present, `chunks` are appended when available. Removed fallback to `apiConversationHistory` for WS query. Added `wsQuerySource` field to pipeline logger (`rrr-queryText+chunks` or `rrr-queryText`). Added `queryText` field to `RrrResult` interface and populated it in `rrrSearch()` return and all `getEffectiveApiHistoryWithVectorSearch()` early returns. ([`sessionQdrant.ts:37`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L37), [`sessionQdrant.ts:404`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L404), [`condense/index.ts:755`](AiZayaProject/morozcode/src/core/condense/index.ts#L755), [`Task.ts:5471`](AiZayaProject/morozcode/src/core/task/Task.ts#L5471), [`Task.ts:5530`](AiZayaProject/morozcode/src/core/task/Task.ts#L5530))
+
 ## 2.4.20
 
 ### Bug Fixes

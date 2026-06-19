@@ -761,6 +761,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 						extractedTsCount: 0,
 						reasonForEmpty: "Qdrant not configured (default localhost)",
 					},
+					queryText,
 				},
 			}
 		}
@@ -768,63 +769,66 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 		// Check query text is not empty
 		if (!queryText || queryText.trim().length === 0) {
 			return {
-				messages: [],
-				rrrResult: {
-					chunks: [],
-					relevantTs: new Set<number>(),
-					enrichedContext: false,
-					diagnostics: {
-						findChunksResult: [],
-						extractedTsCount: 0,
-						reasonForEmpty: "Empty query text, skipping RRR",
+					messages: [],
+					rrrResult: {
+						chunks: [],
+						relevantTs: new Set<number>(),
+						enrichedContext: false,
+						diagnostics: {
+							findChunksResult: [],
+							extractedTsCount: 0,
+							reasonForEmpty: "Empty query text, skipping RRR",
+						},
+						queryText,
 					},
-				},
+				}
 			}
-		}
-
-		// Early check: embedding model must be configured
-		// NOTE: embedderModelId is passed from Task.ts via providerRef.getCodebaseIndexEmbedderModelId()
-		// which reads from globalState (where UI saves codebase indexing config).
-		// Do NOT fallback to getEmbeddingModelId() — it reads from settings.json which is NOT written by UI.
-		if (!embedderModelId) {
-			return {
-				messages: [],
-				rrrResult: {
-					chunks: [],
-					relevantTs: new Set<number>(),
-					enrichedContext: false,
-					diagnostics: {
-						findChunksResult: [],
-						extractedTsCount: 0,
-						reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code: Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
+	
+			// Early check: embedding model must be configured
+			// NOTE: embedderModelId is passed from Task.ts via providerRef.getCodebaseIndexEmbedderModelId()
+			// which reads from globalState (where UI saves codebase indexing config).
+			// Do NOT fallback to getEmbeddingModelId() — it reads from settings.json which is NOT written by UI.
+			if (!embedderModelId) {
+				return {
+					messages: [],
+					rrrResult: {
+						chunks: [],
+						relevantTs: new Set<number>(),
+						enrichedContext: false,
+						diagnostics: {
+							findChunksResult: [],
+							extractedTsCount: 0,
+							reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code: Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
+						},
+						queryText,
 					},
-				},
+				}
 			}
-		}
-
-		// Get Qdrant config and vector size
-		const qdrantConfig = getQdrantConfig()
-		const vectorSize = getVectorSize(embedderModelId)
-
-		// Get embedder key: use provided key first, fallback to config/env resolution
-		console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
-		const apiKey = embedderApiKey || getEmbedderApiKey()
-		console.log(`[getEffectiveApiHistoryWithVectorSearch] resolved apiKey: ${!!apiKey}, length: ${apiKey?.length ?? 0}`)
-		if (!apiKey) {
-			return {
-				messages: [],
-				rrrResult: {
-					chunks: [],
-					relevantTs: new Set<number>(),
-					enrichedContext: false,
-					diagnostics: {
-						findChunksResult: [],
-						extractedTsCount: 0,
-						reasonForEmpty: "No embedder API key available",
+	
+			// Get Qdrant config and vector size
+			const qdrantConfig = getQdrantConfig()
+			const vectorSize = getVectorSize(embedderModelId)
+	
+			// Get embedder key: use provided key first, fallback to config/env resolution
+			console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
+			const apiKey = embedderApiKey || getEmbedderApiKey()
+			console.log(`[getEffectiveApiHistoryWithVectorSearch] resolved apiKey: ${!!apiKey}, length: ${apiKey?.length ?? 0}`)
+			if (!apiKey) {
+				return {
+					messages: [],
+					rrrResult: {
+						chunks: [],
+						relevantTs: new Set<number>(),
+						enrichedContext: false,
+						diagnostics: {
+							findChunksResult: [],
+							extractedTsCount: 0,
+							reasonForEmpty: "No embedder API key available",
+						},
+						queryText,
 					},
-				},
+				}
 			}
-		}
 
 		const embedderObj = createDirectEmbedder(apiKey, undefined, embedderModelId)
 		const embedFunction = embedderObj.embedFunction
@@ -869,6 +873,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 						...rrrResultWithTiming.diagnostics,
 						reasonForEmpty: "RRR found no relevant fragments (relevantTs empty after RRR cycle)",
 					},
+					queryText,
 				},
 			}
 		}
@@ -895,6 +900,7 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 					reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
 					rrrDurationMs,
 				},
+				queryText,
 			},
 		}
 	}
