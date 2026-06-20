@@ -64,7 +64,6 @@ describe("chunkMessage", () => {
 	})
 
 	it("should return fallback for empty message", async () => {
-		const mockHandler = createMockApiHandler("")
 		const message = makeApiMessage("assistant", "")
 		const allMessages: ApiMessage[] = [
 			makeApiMessage("user", "Hello"),
@@ -75,7 +74,6 @@ describe("chunkMessage", () => {
 			message,
 			1,
 			allMessages,
-			mockHandler,
 			taskId,
 			tmpDir,
 		)
@@ -85,24 +83,7 @@ describe("chunkMessage", () => {
 		expect(result.tags).toBeDefined()
 	})
 
-	it("should call LLM and parse response", async () => {
-		const llmResponse = JSON.stringify({
-			fragments: [
-				{
-					chunk_id: "test-chunk-1",
-					text: "This is a test fragment",
-					summary: "Test summary",
-					tags: {
-						direct: ["topic:test", "tool:read_file"],
-						depends_on: [],
-						depended_by: [],
-						weights: { "topic:test": 0.9, "tool:read_file": 0.7 },
-					},
-				},
-			],
-		})
-
-		const mockHandler = createMockApiHandler(llmResponse)
+	it("should return fallback for static chunking", async () => {
 		const message = makeApiMessage("assistant", "Test message content for refactoring")
 		const allMessages: ApiMessage[] = [
 			makeApiMessage("user", "Hello"),
@@ -113,40 +94,18 @@ describe("chunkMessage", () => {
 			message,
 			1,
 			allMessages,
-			mockHandler,
 			taskId,
 			tmpDir,
 		)
 
-		// Verify LLM was called
-		expect(mockHandler.createMessage).toHaveBeenCalledTimes(1)
-
 		// Verify result structure
 		expect(result).toBeDefined()
-		expect(result.source).toBe("llm")
-		expect(result.fragments.length).toBeGreaterThan(0)
+		expect(result.source).toBe("fallback")
+		expect(result.fragments).toEqual([])
 		expect(result.tags).toBeDefined()
-		expect(result.tags.direct.length).toBeGreaterThan(0)
 	})
 
-	it("should save tag index to disk", async () => {
-		const llmResponse = JSON.stringify({
-			fragments: [
-				{
-					chunk_id: "test-chunk-1",
-					text: "Fragment about TypeScript",
-					summary: "TypeScript discussion",
-					tags: {
-						direct: ["topic:typescript"],
-						depends_on: [],
-						depended_by: [],
-						weights: { "topic:typescript": 0.9 },
-					},
-				},
-			],
-		})
-
-		const mockHandler = createMockApiHandler(llmResponse)
+	it("should save messages to disk", async () => {
 		const message = makeApiMessage("assistant", "Let me explain TypeScript...")
 		const allMessages: ApiMessage[] = [
 			makeApiMessage("user", "What is TypeScript?"),
@@ -157,55 +116,6 @@ describe("chunkMessage", () => {
 			message,
 			1,
 			allMessages,
-			mockHandler,
-			taskId,
-			tmpDir,
-		)
-
-		// Verify tag index file was created
-		const taskDir = path.join(tmpDir, "tasks", taskId)
-		const tagIndexPath = path.join(taskDir, GlobalFileNames.sessionTagIndex)
-
-		const tagIndexExists = await fs.access(tagIndexPath).then(() => true).catch(() => false)
-		expect(tagIndexExists).toBe(true)
-
-		// Verify tag index content
-		const tagIndexContent = await fs.readFile(tagIndexPath, "utf8")
-		const tagIndex = JSON.parse(tagIndexContent)
-		expect(tagIndex.version).toBe(1)
-		expect(tagIndex.chunk_index).toBeDefined()
-		expect(tagIndex.chunk_index["topic:typescript"]).toBeDefined()
-	})
-
-	it("should save updated messages with tags", async () => {
-		const llmResponse = JSON.stringify({
-			fragments: [
-				{
-					chunk_id: "test-chunk-1",
-					text: "Fragment about React",
-					summary: "React discussion",
-					tags: {
-						direct: ["topic:react", "library:react"],
-						depends_on: [],
-						depended_by: [],
-						weights: { "topic:react": 0.9, "library:react": 0.8 },
-					},
-				},
-			],
-		})
-
-		const mockHandler = createMockApiHandler(llmResponse)
-		const message = makeApiMessage("assistant", "React is a library...")
-		const allMessages: ApiMessage[] = [
-			makeApiMessage("user", "Tell me about React"),
-			message,
-		]
-
-		await chunkMessage(
-			message,
-			1,
-			allMessages,
-			mockHandler,
 			taskId,
 			tmpDir,
 		)
@@ -217,11 +127,37 @@ describe("chunkMessage", () => {
 		const messagesExist = await fs.access(messagesPath).then(() => true).catch(() => false)
 		expect(messagesExist).toBe(true)
 
-		// Verify messages content has tags
+		// Verify messages content
 		const messagesContent = await fs.readFile(messagesPath, "utf8")
 		const messages = JSON.parse(messagesContent)
 		expect(messages.length).toBe(2)
-		expect(messages[1].relevance_tags).toBeDefined()
-		expect(messages[1].fragments).toBeDefined()
+	})
+
+	it("should save updated messages with metadata", async () => {
+		const message = makeApiMessage("assistant", "React is a library...")
+		const allMessages: ApiMessage[] = [
+			makeApiMessage("user", "Tell me about React"),
+			message,
+		]
+
+		await chunkMessage(
+			message,
+			1,
+			allMessages,
+			taskId,
+			tmpDir,
+		)
+
+		// Verify messages file was created/updated
+		const taskDir = path.join(tmpDir, "tasks", taskId)
+		const messagesPath = path.join(taskDir, GlobalFileNames.apiConversationHistory)
+
+		const messagesExist = await fs.access(messagesPath).then(() => true).catch(() => false)
+		expect(messagesExist).toBe(true)
+
+		// Verify messages content
+		const messagesContent = await fs.readFile(messagesPath, "utf8")
+		const messages = JSON.parse(messagesContent)
+		expect(messages.length).toBe(2)
 	})
 })
