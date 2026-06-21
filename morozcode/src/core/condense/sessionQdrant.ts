@@ -3,6 +3,8 @@ import * as path from "path"
 import * as vscode from "vscode"
 
 import type { EmbedderProvider } from "@roo-code/types"
+import { ApiMessage } from "../task-persistence/apiMessages"
+import { extractMessageText } from "../task-persistence/messageRefactorer"
 import { CodeIndexManager } from "../../services/code-index/manager"
 import { OpenAICompatibleEmbedder } from "../../services/code-index/embedders/openai-compatible"
 import { getModelDimension } from "../../shared/embeddingModels"
@@ -34,7 +36,15 @@ export interface RrrResult {
 	relevantTs: Set<number>
 	enrichedContext: boolean
 	diagnostics: RrrDiagnostics
-	queryText: string
+}
+
+export interface TrySearchResult {
+	success: boolean
+	chunks: RrrChunk[]
+	relevantTs: Set<number>
+	enrichedContext: boolean
+	diagnostics: RrrDiagnostics
+	error?: string
 }
 
 export interface WsQuery {
@@ -402,7 +412,63 @@ export async function rrrSearch(
 			findChunksResult: chunks.map((c) => c.chunkId),
 			extractedTsCount: messageTsSet.size,
 		},
-		queryText,
+	}
+}
+
+/**
+ * TrySearch: safe wrapper around rrrSearch that never throws.
+ * Returns success=false with error message on any failure.
+ */
+export async function trySearchRRR(
+	embedFunction: (text: string) => Promise<number[]>,
+	client: QdrantClient,
+	collectionName: string,
+	queryText: string,
+	taskId: string,
+	maxIterations: number = 3,
+	fragmentsPerIteration: number = 3,
+	scoreThreshold: number = 0.0,
+	systemPrompt?: string,
+): Promise<TrySearchResult> {
+	const startTime = Date.now()
+	try {
+		const result = await rrrSearch(
+			embedFunction,
+			client,
+			collectionName,
+			queryText,
+			taskId,
+			maxIterations,
+			fragmentsPerIteration,
+			scoreThreshold,
+			systemPrompt,
+		)
+		return {
+			success: true,
+			chunks: result.chunks,
+			relevantTs: result.relevantTs,
+			enrichedContext: result.enrichedContext,
+			diagnostics: {
+				...result.diagnostics,
+				rrrDurationMs: Date.now() - startTime,
+			},
+		}
+	} catch (error) {
+		const duration = Date.now() - startTime
+		console.warn(`[trySearchRRR] RRR failed after ${duration}ms:`, error)
+		return {
+			success: false,
+			chunks: [],
+			relevantTs: new Set<number>(),
+			enrichedContext: false,
+			diagnostics: {
+				findChunksResult: [],
+				extractedTsCount: 0,
+				reasonForEmpty: `RRR failed: ${error instanceof Error ? error.message : String(error)}`,
+				rrrDurationMs: duration,
+			},
+			error: error instanceof Error ? error.message : String(error),
+		}
 	}
 }
 
@@ -564,6 +630,465 @@ export function extractTsFromChunkId(chunkId: string): string | null {
 
 	// Если формат не распознан — chunk_id произвольный, ts не извлекается
 	return null
+}
+
+// ─── Session History Indexing ─────────────────────────────────────────────────
+
+/**
+ * Index a single message into the session history Qdrant collection.
+ * Extracts text, chunks it by paragraphs, embeds each chunk, and upserts to Qdrant.
+ *
+ * Fire-and-forget safe: catches all errors and returns them without throwing.
+ *
+ * @param message - The ApiMessage to index (must have `ts` field)
+ * @param taskId - The task ID for filtering
+ * @param workspacePath - The workspace path for collection naming
+ * @param embedderApiKey - Optional API key for embedding
+ * @param embedderModelId - Optional embedding model ID
+ * @returns Result with indexed=true on success, or indexed=false with error message
+ */
+export async function indexMessageHistory(
+	message: ApiMessage,
+	taskId: string,
+	workspacePath: string,
+	embedderApiKey?: string,
+	embedderModelId?: string,
+): Promise<{ indexed: boolean; chunksCount: number; error?: string }> {
+	try {
+		// Validate message has timestamp
+		if (!message.ts) {
+			return { indexed: false, chunksCount: 0, error: "Message has no timestamp (ts field)" }
+		}
+
+		const messageTs = message.ts
+
+		// Extract text from message
+		const messageText = extractMessageText(message)
+		if (!messageText || messageText.trim().length === 0) {
+			return { indexed: false, chunksCount: 0, error: "Empty message text, skipping indexing" }
+		}
+
+		// Chunk by paragraphs (same logic as chunkMessage but without LLM)
+		const paragraphs = messageText.split(/\n\s*\n/).filter((p) => p.trim().length > 0)
+		if (paragraphs.length === 0) {
+			return { indexed: false, chunksCount: 0, error: "No paragraphs after splitting" }
+		}
+
+		// Build fragments with chunk_ids
+		const maxFragments = 50
+		const fragments: Array<{ chunk_id: string; text: string; summary: string }> = []
+		for (let i = 0; i < Math.min(paragraphs.length, maxFragments); i++) {
+			const paragraph = paragraphs[i]
+			if (!paragraph) continue
+			const text = paragraph.trim()
+			if (!text) continue
+			fragments.push({
+				chunk_id: `msg-${messageTs}-frag-${i}`,
+				text,
+				summary: text.length > 120 ? text.slice(0, 120) + "..." : text,
+			})
+		}
+
+		if (fragments.length === 0) {
+			return { indexed: false, chunksCount: 0, error: "No valid fragments after processing" }
+		}
+
+		// Get Qdrant config and vector size
+		const qdrantCfg = getQdrantConfig()
+		const vSize = getVectorSize(embedderModelId)
+
+		// Ensure collection exists
+		const { client, collectionName } = await ensureSessionCollection(
+			workspacePath,
+			qdrantCfg.url,
+			vSize,
+			qdrantCfg.apiKey,
+		)
+
+		// Create embedder
+		const { embedFunction } = createDirectEmbedder(embedderApiKey, undefined, embedderModelId)
+
+		// Embed all fragment texts
+		const embeddings: number[][] = []
+		for (const fragment of fragments) {
+			try {
+				const vec = await embedFunction(fragment.summary || fragment.text)
+				embeddings.push(vec)
+			} catch (embedError) {
+				console.warn(`[indexMessageHistory] Embedding failed for fragment ${fragment.chunk_id}:`, embedError)
+				embeddings.push([])
+			}
+		}
+
+		// Build points for upsert
+		const points = fragments
+			.map((f, idx) => ({
+				id: `${taskId}_${f.chunk_id}_${messageTs}`,
+				vector: embeddings[idx] || [],
+				payload: {
+					type: "session_history",
+					taskId,
+					messageTs: String(messageTs),
+					chunkId: f.chunk_id,
+					text: f.summary || f.text,
+				},
+			}))
+			.filter((p) => p.vector.length > 0)
+
+		if (points.length === 0) {
+			return { indexed: false, chunksCount: 0, error: "No valid embeddings produced" }
+		}
+
+		// Upsert to Qdrant (wait:true for durability)
+		await client.upsert(collectionName, {
+			points: points.map((p) => ({
+				id: p.id,
+				vector: p.vector,
+				payload: p.payload,
+			})),
+			wait: true,
+		})
+
+		console.log(`[indexMessageHistory] Indexed ${points.length} chunks for message ts=${messageTs}, taskId=${taskId}`)
+		return { indexed: true, chunksCount: points.length }
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.warn(`[indexMessageHistory] Failed to index message:`, errorMessage)
+		return { indexed: false, chunksCount: 0, error: errorMessage }
+	}
+}
+
+/**
+ * Index a batch of messages into the session history Qdrant collection.
+ * Processes each message sequentially to avoid overwhelming the embedder API.
+ *
+ * Fire-and-forget safe: catches all errors and returns them without throwing.
+ *
+ * @param messages - Array of ApiMessage to index
+ * @param taskId - The task ID for filtering
+ * @param workspacePath - The workspace path for collection naming
+ * @param embedderApiKey - Optional API key for embedding
+ * @param embedderModelId - Optional embedding model ID
+ * @returns Result with count of successfully indexed messages and any errors
+ */
+export async function indexMessagesBatch(
+	messages: ApiMessage[],
+	taskId: string,
+	workspacePath: string,
+	embedderApiKey?: string,
+	embedderModelId?: string,
+): Promise<{ indexed: number; totalChunks: number; errors: string[] }> {
+	const errors: string[] = []
+	let totalIndexed = 0
+	let totalChunks = 0
+
+	for (const message of messages) {
+		try {
+			const result = await indexMessageHistory(
+				message,
+				taskId,
+				workspacePath,
+				embedderApiKey,
+				embedderModelId,
+			)
+			if (result.indexed) {
+				totalIndexed++
+				totalChunks += result.chunksCount
+			} else if (result.error) {
+				errors.push(result.error)
+			}
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			errors.push(errorMessage)
+		}
+	}
+
+	console.log(`[indexMessagesBatch] Batch complete: ${totalIndexed}/${messages.length} messages indexed, ${totalChunks} total chunks, ${errors.length} errors`)
+	return { indexed: totalIndexed, totalChunks, errors }
+}
+
+// ─── Session History Reindexing ──────────────────────────────────────────────
+
+/**
+ * Delete all session history points for a specific taskId from the Qdrant collection.
+ * Uses filter-based deletion to only remove points matching { type: "session_history", taskId }.
+ *
+ * @param client - QdrantClient instance
+ * @param collectionName - Name of the collection
+ * @param taskId - Task ID to delete points for
+ * @returns Result with deleted=true on success, or deleted=false with error message
+ */
+export async function deleteSessionHistoryByTaskId(
+	client: QdrantClient,
+	collectionName: string,
+	taskId: string,
+): Promise<{ deleted: boolean; error?: string }> {
+	try {
+		await client.delete(collectionName, {
+			filter: {
+				must: [
+					{ key: "type", match: { value: "session_history" } },
+					{ key: "taskId", match: { value: taskId } },
+				],
+			},
+			wait: true,
+		})
+		console.log(`[deleteSessionHistoryByTaskId] Deleted points for taskId=${taskId} from ${collectionName}`)
+		return { deleted: true }
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.warn(`[deleteSessionHistoryByTaskId] Failed to delete points for taskId=${taskId}:`, errorMessage)
+		return { deleted: false, error: errorMessage }
+	}
+}
+
+/**
+ * Re-index all messages from the session history into Qdrant.
+ *
+ * Algorithm:
+ * 1. Ensure the session collection exists (creates if needed)
+ * 2. Delete all existing points for this taskId (clean slate)
+ * 3. Index all messages via indexMessagesBatch
+ *
+ * Fire-and-forget safe: catches all errors and returns them in the result.
+ *
+ * @param messages - Array of ApiMessage to index
+ * @param taskId - The task ID for filtering
+ * @param workspacePath - The workspace path for collection naming
+ * @param embedderApiKey - Optional API key for embedding
+ * @param embedderModelId - Optional embedding model ID
+ * @returns Result with total, indexed count, and errors count
+ */
+export async function reindexAllHistory(
+	messages: ApiMessage[],
+	taskId: string,
+	workspacePath: string,
+	embedderApiKey?: string,
+	embedderModelId?: string,
+): Promise<{ total: number; indexed: number; errors: number }> {
+	try {
+		// Get Qdrant config and vector size
+		const qdrantCfg = getQdrantConfig()
+		const vSize = getVectorSize(embedderModelId)
+
+		// Ensure collection exists
+		const { client, collectionName } = await ensureSessionCollection(
+			workspacePath,
+			qdrantCfg.url,
+			vSize,
+			qdrantCfg.apiKey,
+		)
+
+		// Delete old points for this taskId
+		const deleteResult = await deleteSessionHistoryByTaskId(client, collectionName, taskId)
+		if (!deleteResult.deleted) {
+			console.warn(`[reindexAllHistory] Delete failed (proceeding anyway): ${deleteResult.error}`)
+		}
+
+		// Index all messages
+		const batchResult = await indexMessagesBatch(
+			messages,
+			taskId,
+			workspacePath,
+			embedderApiKey,
+			embedderModelId,
+		)
+
+		console.log(
+			`[reindexAllHistory] Reindex complete: ${batchResult.indexed}/${messages.length} messages, ` +
+			`${batchResult.totalChunks} chunks, ${batchResult.errors.length} errors`,
+		)
+
+		return {
+			total: messages.length,
+			indexed: batchResult.indexed,
+			errors: batchResult.errors.length,
+		}
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		console.error(`[reindexAllHistory] Reindex failed:`, errorMessage)
+		return {
+			total: messages.length,
+			indexed: 0,
+			errors: 1,
+		}
+	}
+}
+
+/**
+ * Health status of the session history collection.
+ * Used by checkSessionCollectionHealth() to report whether reindexing is needed.
+ */
+export interface CollectionHealthStatus {
+	/** Whether the collection exists and is accessible */
+	exists: boolean
+	/** Whether the vector dimension matches the expected size */
+	dimensionOk: boolean
+	/** Actual vector dimension in the collection (0 if collection doesn't exist) */
+	actualDimension: number
+	/** Expected vector dimension from the current model config */
+	expectedDimension: number
+	/** Number of points for the specific taskId (0 if collection doesn't exist) */
+	pointsForTask: number
+	/** Whether reindexing is recommended */
+	needsReindex: boolean
+	/** Human-readable reason for reindex recommendation (empty if healthy) */
+	reason?: string
+	/** Error message if the check itself failed */
+	error?: string
+}
+
+/**
+ * Check the health of the session history collection for a specific taskId.
+ *
+ * Performs the following checks:
+ * 1. Collection existence (via ensureSessionCollection)
+ * 2. Vector dimension match (actual vs expected from current model)
+ * 3. Points existence for the taskId (via client.count)
+ *
+ * This is the GROUND TRUTH for deciding whether reindexing is needed.
+ * It checks the ACTUAL Qdrant state, not in-memory tracking.
+ *
+ * @param taskId - Task ID to check points for
+ * @param workspacePath - Workspace path for collection naming
+ * @param embedderModelId - Optional embedding model ID (resolved from config if not provided)
+ * @returns CollectionHealthStatus with detailed health information
+ */
+export async function checkSessionCollectionHealth(
+	taskId: string,
+	workspacePath: string,
+	embedderModelId?: string,
+): Promise<CollectionHealthStatus> {
+	const qdrantCfg = getQdrantConfig()
+
+	// Resolve expected vector dimension
+	let expectedDimension: number
+	try {
+		expectedDimension = getVectorSize(embedderModelId)
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		return {
+			exists: false,
+			dimensionOk: false,
+			actualDimension: 0,
+			expectedDimension: 0,
+			pointsForTask: 0,
+			needsReindex: false,
+			reason: `Cannot determine vector dimension: ${errorMessage}`,
+			error: errorMessage,
+		}
+	}
+
+	// Ensure collection exists (creates if needed)
+	let client: QdrantClient
+	let collectionName: string
+	try {
+		const result = await ensureSessionCollection(
+			workspacePath,
+			qdrantCfg.url,
+			expectedDimension,
+			qdrantCfg.apiKey,
+		)
+		client = result.client
+		collectionName = result.collectionName
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+		return {
+			exists: false,
+			dimensionOk: false,
+			actualDimension: 0,
+			expectedDimension,
+			pointsForTask: 0,
+			needsReindex: false,
+			reason: `Cannot access/create collection: ${errorMessage}`,
+			error: errorMessage,
+		}
+	}
+
+	// Check collection info (dimension)
+	try {
+		const info = await client.getCollection(collectionName)
+		const vectorsConfig = info.config.params.vectors
+		const actualDimension = typeof vectorsConfig === "object" && vectorsConfig !== null
+			? (vectorsConfig.size as number)
+			: 0
+
+		// Check dimension mismatch
+		if (actualDimension !== expectedDimension) {
+			return {
+				exists: true,
+				dimensionOk: false,
+				actualDimension,
+				expectedDimension,
+				pointsForTask: 0,
+				needsReindex: true,
+				reason: `Dimension mismatch: collection=${actualDimension}, model=${expectedDimension}. Reindex required after model change.`,
+			}
+		}
+
+		// Check points for this taskId
+		const countResult = await client.count(collectionName, {
+			filter: {
+				must: [
+					{ key: "type", match: { value: "session_history" } },
+					{ key: "taskId", match: { value: taskId } },
+				],
+			},
+		})
+
+		const pointsForTask = countResult.count
+
+		if (pointsForTask === 0) {
+			return {
+				exists: true,
+				dimensionOk: true,
+				actualDimension,
+				expectedDimension,
+				pointsForTask: 0,
+				needsReindex: true,
+				reason: `Collection exists with correct dimension (${actualDimension}) but has 0 points for taskId=${taskId}. Data was lost or never indexed.`,
+			}
+		}
+
+		// Collection is healthy
+		return {
+			exists: true,
+			dimensionOk: true,
+			actualDimension,
+			expectedDimension,
+			pointsForTask,
+			needsReindex: false,
+		}
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error)
+
+		// Collection doesn't exist (404) — ensureSessionCollection should have created it,
+		// but if we get here, something is wrong
+		if (errorMessage.includes("404") || errorMessage.includes("Not found")) {
+			return {
+				exists: false,
+				dimensionOk: false,
+				actualDimension: 0,
+				expectedDimension,
+				pointsForTask: 0,
+				needsReindex: true,
+				reason: `Collection ${collectionName} not found after ensureSessionCollection. Qdrant may be unavailable.`,
+				error: errorMessage,
+			}
+		}
+
+		// Other error (Qdrant unavailable, etc.)
+		return {
+			exists: true,
+			dimensionOk: true,
+			actualDimension: expectedDimension,
+			expectedDimension,
+			pointsForTask: 0,
+			needsReindex: false,
+			reason: `Health check failed: ${errorMessage}. Cannot determine if reindex is needed.`,
+			error: errorMessage,
+		}
+	}
 }
 
 // ─── Workspace RAG Search ─────────────────────────────────────────────────────

@@ -789,19 +789,65 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 
 	/**
-
-	 * Push a tool_result block to userMessageContent, preventing duplicates.
-
-	 * Duplicate tool_use_ids cause API errors.
-
-	 *
-
-	 * @param toolResult - The tool_result block to add
-
-	 * @returns true if added, false if duplicate was skipped
-
+	
+	 * Set of message timestamps (ts) that have already been indexed to Qdrant.
+	
+	 * Used to avoid duplicate indexing when addToApiConversationHistory is called
+	
+	 * multiple times for the same message.
+	
 	 */
+	
+	private indexedMessageTs = new Set<number>()
+	
+	
+	
+	/**
+	
+	 * 2.9.17.3: Session history indexing state.
+	
+	 * Tracks whether background indexing is in progress, idle, or failed.
+	
+	 * Used by RRR guard flags to decide whether to use vector search or fallback.
+	
+	 */
+	
+	private _sessionHistoryIndexingState: "idle" | "indexing" | "error" = "idle"
+	
+	
+	
+	/**
+	
+	 * 2.9.17.3: Error message from the last indexing failure.
+	
+	 * When non-null, RRR guard flags treat this as a red flag (skip vector search).
+	
+	 */
+	
+	private _sessionHistoryIndexingError: string | null = null
 
+	/**
+	 * 2.9.17.4: Whether a background reindex operation is currently in progress.
+	 * Prevents concurrent reindex operations.
+	 */
+	private _sessionHistoryReindexing: boolean = false
+	
+	
+	
+	/**
+	
+	 * Push a tool_result block to userMessageContent, preventing duplicates.
+	
+	 * Duplicate tool_use_ids cause API errors.
+	
+	 *
+	
+	 * @param toolResult - The tool_result block to add
+	
+	 * @returns true if added, false if duplicate was skipped
+	
+	 */
+	
 	public pushToolResultToUserContent(toolResult: Anthropic.ToolResultBlockParam): boolean {
 
 		const existingResult = this.userMessageContent.find(
@@ -1821,9 +1867,229 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		await this.saveApiConversationHistory()
 
+		// Fire-and-forget: index the newly added message to Qdrant session history
+
+		// This enables RRR to find relevant fragments from the current session
+
+		const lastMessage = this.apiConversationHistory[this.apiConversationHistory.length - 1]
+
+		if (lastMessage?.ts && !this.indexedMessageTs.has(lastMessage.ts)) {
+
+			this.indexedMessageTs.add(lastMessage.ts)
+
+			this.indexMessageHistoryFireAndForget(lastMessage)
+
+		}
+
 	}
 
+	/**
 
+	 * Fire-and-forget message indexing to Qdrant.
+
+	 * Errors are caught and logged but never propagated.
+
+	 */
+
+	private indexMessageHistoryFireAndForget(message: ApiMessage): void {
+
+		;(async () => {
+
+			// 2.9.17.3: Set indexing state to "indexing" before starting
+			this._sessionHistoryIndexingState = "indexing"
+			this._sessionHistoryIndexingError = null
+
+			try {
+
+				const { indexMessageHistory } = await import("../condense/sessionQdrant")
+
+				const config = vscode.workspace.getConfiguration("roo-code.codebaseIndex")
+
+				const apiKey = config.get<string>("openAiKey") || config.get<string>("openRouterKey", "")
+
+				const embeddingModelId = config.get<string>("embeddingModelId")
+
+				const result = await indexMessageHistory(
+
+					message,
+
+					this.taskId,
+
+					this.globalStoragePath,
+
+					apiKey || undefined,
+
+					embeddingModelId || undefined,
+
+				)
+
+				if (!result.indexed && result.error) {
+
+					// 2.9.17.3: Red flag — indexing error
+					this._sessionHistoryIndexingState = "error"
+					this._sessionHistoryIndexingError = result.error
+					console.warn(`[Task#${this.taskId}] Session history indexing skipped: ${result.error}`)
+
+				} else {
+
+					// 2.9.17.3: Success — back to idle
+					this._sessionHistoryIndexingState = "idle"
+				}
+
+			} catch (error) {
+
+				// 2.9.17.3: Red flag — unexpected error
+				const errorMsg = error instanceof Error ? error.message : String(error)
+				this._sessionHistoryIndexingState = "error"
+				this._sessionHistoryIndexingError = errorMsg
+				console.warn(`[Task#${this.taskId}] Session history indexing failed (non-fatal):`, errorMsg)
+
+			}
+
+		})()
+
+	}
+
+	// ─── Session History Reindexing (2.9.17.4) ─────────────────────────────────
+
+	/**
+	 * Check if the session history collection needs reindexing.
+	 *
+	 * This is the GROUND TRUTH check — it queries the actual Qdrant collection
+	 * via API (getCollection + count), NOT the ephemeral in-memory indexedMessageTs.
+	 *
+	 * Triggers reindex ONLY when:
+	 * 1. Collection doesn't exist (404 from getCollection)
+	 * 2. Vector dimension mismatch (user changed embedding model)
+	 * 3. Collection has 0 points for this taskId (data lost/deleted)
+	 *
+	 * Does NOT trigger reindex when:
+	 * - Qdrant is not configured
+	 * - No messages to index
+	 * - No embedding model configured
+	 * - Collection is healthy (correct dimension + has points)
+	 * - Qdrant is unavailable
+	 * - Reindex already in progress
+	 *
+	 * @returns true if reindex was triggered, false otherwise
+	 */
+	public async checkAndReindexIfNeeded(): Promise<boolean> {
+		// GUARD: Qdrant must be configured
+		const { isQdrantConfigured } = await import("../condense/sessionQdrant")
+		if (!isQdrantConfigured()) {
+			return false
+		}
+
+		// GUARD: Must have messages to index
+		if (this.apiConversationHistory.length === 0) {
+			return false
+		}
+
+		// GUARD: Don't run concurrent reindex operations
+		if (this._sessionHistoryReindexing) {
+			console.log(`[Task#${this.taskId}] checkAndReindexIfNeeded: reindex already in progress, skipping`)
+			return false
+		}
+
+		// Check collection health via Qdrant API
+		const { checkSessionCollectionHealth } = await import("../condense/sessionQdrant")
+
+		// Resolve model ID from provider (same as RRR uses)
+		const provider = this.providerRef.deref()
+		const embedderModelId = provider?.getCodebaseIndexEmbedderModelId?.()
+
+		const health = await checkSessionCollectionHealth(
+			this.taskId,
+			this.globalStoragePath,
+			embedderModelId,
+		)
+
+		if (health.needsReindex) {
+			console.log(
+				`[Task#${this.taskId}] checkAndReindexIfNeeded: REINDEX NEEDED — ${health.reason}`,
+			)
+			// Fire-and-forget: start reindex in background
+			this.reindexSessionHistory()
+			return true
+		}
+
+		console.log(
+			`[Task#${this.taskId}] checkAndReindexIfNeeded: collection healthy ` +
+			`(dim=${health.actualDimension}, points=${health.pointsForTask})`,
+		)
+		return false
+	}
+
+	/**
+	 * Re-index all messages from apiConversationHistory into Qdrant.
+	 *
+	 * Fire-and-forget: runs in background, never blocks the pipeline.
+	 * Sets _sessionHistoryReindexing flag to prevent concurrent operations.
+	 *
+	 * On success: updates indexedMessageTs for all messages.
+	 * On failure: sets _sessionHistoryIndexingState = "error".
+	 */
+	public reindexSessionHistory(): void {
+		if (this._sessionHistoryReindexing) {
+			console.log(`[Task#${this.taskId}] reindexSessionHistory: already in progress, skipping`)
+			return
+		}
+
+		this._sessionHistoryReindexing = true
+		this._sessionHistoryIndexingState = "indexing"
+		this._sessionHistoryIndexingError = null
+
+		const messages = [...this.apiConversationHistory]
+
+		console.log(
+			`[Task#${this.taskId}] reindexSessionHistory: starting background reindex of ${messages.length} messages`,
+		)
+
+		;(async () => {
+			try {
+				const { reindexAllHistory } = await import("../condense/sessionQdrant")
+
+				const provider = this.providerRef.deref()
+				const embedderApiKey = this.apiConfiguration?.openRouterApiKey
+					|| this.apiConfiguration?.apiKey
+					|| process.env.OPENROUTER_API_KEY
+					|| process.env.OPENAI_API_KEY
+					|| undefined
+				const embedderModelId = provider?.getCodebaseIndexEmbedderModelId?.()
+
+				const result = await reindexAllHistory(
+					messages,
+					this.taskId,
+					this.globalStoragePath,
+					embedderApiKey,
+					embedderModelId,
+				)
+
+				// Update indexedMessageTs for all successfully indexed messages
+				for (const msg of messages) {
+					if (msg.ts) {
+						this.indexedMessageTs.add(msg.ts)
+					}
+				}
+
+				this._sessionHistoryIndexingState = "idle"
+
+				console.log(
+					`[Task#${this.taskId}] reindexSessionHistory: complete — ` +
+					`${result.indexed}/${result.total} indexed, ${result.errors} errors`,
+				)
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error)
+				this._sessionHistoryIndexingState = "error"
+				this._sessionHistoryIndexingError = errorMsg
+				console.error(
+					`[Task#${this.taskId}] reindexSessionHistory: failed — ${errorMsg}`,
+				)
+			} finally {
+				this._sessionHistoryReindexing = false
+			}
+		})()
+	}
 
 	// NOTE: We intentionally do NOT mutate stored messages to merge consecutive user turns.
 
@@ -3915,7 +4181,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			this.apiConversationHistory = await this.getSavedApiConversationHistory()
 
-
+			// 2.9.17.4: Check if session history needs reindexing (fire-and-forget)
+			// Checks actual Qdrant state via API, not ephemeral in-memory tracking.
+			// Safe to call: will NOT trigger reindex if collection is healthy.
+			this.checkAndReindexIfNeeded()
 
 			const lastClineMessage = this.clineMessages
 
@@ -5422,11 +5691,46 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Get system prompt for RRR iterative search (mode instructions, skills, etc.)
 				const systemPrompt = await this.getSystemPrompt()
 
+				// RRR enrichment: independent component, never breaks the pipeline
+				// getEffectiveApiHistoryWithVectorSearch uses trySearchRRR internally (catches all errors)
+				// 2.9.17.3: Check session history indexing flags before running RRR
 				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
-
-					try {
-
-						const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
+					// 2.9.17.3: Red flag — indexing error, log and skip RRR
+					if (this._sessionHistoryIndexingState === "error") {
+						console.error(
+							`[Task#${this.taskId}] RRR SKIPPED (red flag): session history indexing error: ${this._sessionHistoryIndexingError ?? "unknown error"}. ` +
+							`Fix the indexing issue before RRR can use vector search.`,
+						)
+						this._rrrResult = undefined
+						this._rrrMessages = []
+					} else {
+						// 2.9.17.3: Yellow flag — indexing in progress, wait for completion
+						if (this._sessionHistoryIndexingState === "indexing") {
+							console.log(`[Task#${this.taskId}] RRR: session history indexing in progress, waiting...`)
+							const maxWaitMs = 30000
+							const pollIntervalMs = 500
+							const startTime = Date.now()
+							while (this._sessionHistoryIndexingState === "indexing" && (Date.now() - startTime) < maxWaitMs) {
+								await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+							}
+							if (this._sessionHistoryIndexingState === "indexing") {
+								console.error(
+									`[Task#${this.taskId}] RRR SKIPPED: session history indexing still in progress after ${maxWaitMs}ms timeout. ` +
+									`Recent messages may not be indexed yet.`,
+								)
+								this._rrrResult = undefined
+								this._rrrMessages = []
+							} else if (this._sessionHistoryIndexingState === "error") {
+								console.error(
+									`[Task#${this.taskId}] RRR SKIPPED (red flag): session history indexing failed during wait: ${this._sessionHistoryIndexingError ?? "unknown error"}.`,
+								)
+								this._rrrResult = undefined
+								this._rrrMessages = []
+							}
+						}
+						// 2.9.17.3: Green flag (idle) — run RRR if no error occurred during wait
+						if (this._sessionHistoryIndexingState === "idle") {
+							const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
 								this.apiConversationHistory,
 								userTextContent,
 								this.taskId,
@@ -5441,46 +5745,36 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							this._rrrResult = rrrResult
 	
 							if (rrrMessages.length > 0) {
-		
-									// 2.9.15.7: Save RRR messages separately, DO NOT add to apiConversationHistory
-									// Conversation History is NOT sent to the model - only RRR messages are used
-									this._rrrMessages = rrrMessages
-		
-									console.log(
-		
-										`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts (NOT added to history)`,
-		
-									)
-		
-								}
-
-					} catch (error) {
-
-						console.warn(`[Task#${this.taskId}] RRR enrichment failed:`, error)
-
+								// 2.9.15.7: Save RRR messages separately, DO NOT add to apiConversationHistory
+								// Conversation History is NOT sent to the model - only RRR messages are used
+								this._rrrMessages = rrrMessages
+	
+								console.log(
+									`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts (NOT added to history)`,
+								)
+							}
+						}
 					}
-
 				}
-
-				// Workspace RAG Enrichment: search codebase for relevant code fragments
+	
+				// Workspace RAG Enrichment: independent from RRR success/failure
 				this.pipelineLogger.startStep()
 				this._workspaceContext = ""
 				const wsGuardQdrant = isQdrantConfigured()
 				const wsGuardCwd = !!this.cwd
-
-				// Build WS query from RrrResult (always contains queryText, may contain chunks)
+	
+				// Build WS query: userTextContent + RRR chunks (if available)
+				// WS works even if RRR failed - uses userTextContent as fallback
 				let wsSearchQuery = ""
 				let wsQuerySource = "none"
-				if (this._rrrResult) {
-					const parts: string[] = [this._rrrResult.queryText]
-					if (this._rrrResult.chunks.length > 0) {
-						parts.push(this._rrrResult.chunks.map((c: any) => c.text).join('\n'))
-						wsQuerySource = "rrr-queryText+chunks"
-					} else {
-						wsQuerySource = "rrr-queryText"
-					}
-					wsSearchQuery = parts.join('\n\n').substring(0, 2000)
+				const wsParts: string[] = [userTextContent]
+				if (this._rrrResult && this._rrrResult.chunks.length > 0) {
+					wsParts.push(this._rrrResult.chunks.map((c: any) => c.text).join('\n'))
+					wsQuerySource = "userText+rrr-chunks"
+				} else {
+					wsQuerySource = "userText-only"
 				}
+				wsSearchQuery = wsParts.join('\n\n').substring(0, 2000)
 	
 				const wsGuardPassed = wsGuardQdrant && wsGuardCwd && wsSearchQuery.length > 0
 	
@@ -8812,19 +9106,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		let effectiveHistory: ApiMessage[]
 
-		// 2.9.15.7: Conversation History is NOT sent to the model.
-		// Only RRR messages (from vector search) are used as history context.
+		// 2.9.16: RRR messages as primary context, conversation history as fallback
 		const rrrDiagnostics = this._rrrResult?.diagnostics
 		const hasWorkspaceContext = !!(this._workspaceContext && this._workspaceContext.trim().length > 0)
 		const enrichedContext = !!(this._rrrResult && this._rrrResult.enrichedContext) || hasWorkspaceContext
 		const tagMatchDetails: Record<string, number> = {}
-		effectiveHistory = this._rrrMessages // 2.9.15.7: Only RRR messages, NOT full conversation history
 
-		// 2.9.15.7: totalHistory = 0 since conversation history is NOT sent
-		const totalHistory = 0 // this.apiConversationHistory.length — NOT sent to model
+		if (this._rrrMessages.length > 0) {
+			// RRR found relevant messages — use them as history context
+			effectiveHistory = this._rrrMessages
+		} else {
+			// Fallback: RRR found nothing (empty collection, no relevant fragments, or error)
+			// Use conversation history so the model always receives context
+			effectiveHistory = getEffectiveApiHistory(this.apiConversationHistory)
+		}
 
+		const totalHistory = this.apiConversationHistory.length
 		const filteredCount = effectiveHistory.length
-		const requestSummary = `History: 0 messages sent (2.9.15.7), RRR: ${filteredCount}, enriched: ${enrichedContext}`
+		const requestSummary = `History: ${filteredCount} messages sent (2.9.16 fallback), RRR: ${this._rrrMessages.length}, enriched: ${enrichedContext}`
 
 		await this.pipelineLogger.logStep(3, "success", {
 
@@ -8860,11 +9159,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			rrrDurationMs: rrrDiagnostics?.rrrDurationMs,
 
+			// 2.9.17.3: Session history indexing flags
+			sessionHistoryIndexingState: this._sessionHistoryIndexingState,
+			sessionHistoryIndexingError: this._sessionHistoryIndexingError,
+			sessionHistoryIndexedMessagesCount: this.indexedMessageTs.size,
+			// 2.9.17.4: Reindex flag
+			sessionHistoryReindexing: this._sessionHistoryReindexing,
+
 		}, {
 
 			originalRequest: `2.9.15.7: Conversation History NOT sent, RRR only`,
 
-			originalResponse: `RRR: ${filteredCount} messages sent, enriched: ${enrichedContext}, rrrChunks: ${this._rrrResult?.chunks.length ?? 0}`,
+			originalResponse: `RRR: ${filteredCount} messages sent, enriched: ${enrichedContext}, rrrChunks: ${this._rrrResult?.chunks.length ?? 0}, indexingState: ${this._sessionHistoryIndexingState}, indexedMsgs: ${this.indexedMessageTs.size}`,
 
 			modelUsed: this.api.getModel().id,
 

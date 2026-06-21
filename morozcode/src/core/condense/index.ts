@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk"
+﻿import Anthropic from "@anthropic-ai/sdk"
 import crypto from "crypto"
 
 import { TelemetryService } from "@roo-code/telemetry"
@@ -24,7 +24,13 @@ import {
 	createDirectEmbedder,
 	isQdrantConfigured,
 	workspaceSearch,
+	indexMessageHistory,
+	indexMessagesBatch,
+	reindexAllHistory,
+	deleteSessionHistoryByTaskId,
+	checkSessionCollectionHealth,
 	type RrrResult,
+	type CollectionHealthStatus,
 } from "./sessionQdrant"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
@@ -761,7 +767,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 						extractedTsCount: 0,
 						reasonForEmpty: "Qdrant not configured (default localhost)",
 					},
-					queryText,
 				},
 			}
 		}
@@ -779,7 +784,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 							extractedTsCount: 0,
 							reasonForEmpty: "Empty query text, skipping RRR",
 						},
-						queryText,
 					},
 				}
 			}
@@ -800,7 +804,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 							extractedTsCount: 0,
 							reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code: Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
 						},
-						queryText,
 					},
 				}
 			}
@@ -825,7 +828,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 							extractedTsCount: 0,
 							reasonForEmpty: "No embedder API key available",
 						},
-						queryText,
 					},
 				}
 			}
@@ -873,7 +875,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 						...rrrResultWithTiming.diagnostics,
 						reasonForEmpty: "RRR found no relevant fragments (relevantTs empty after RRR cycle)",
 					},
-					queryText,
 				},
 			}
 		}
@@ -900,12 +901,11 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 					reasonForEmpty: `RRR cycle failed: ${error instanceof Error ? error.message : String(error)}`,
 					rrrDurationMs,
 				},
-				queryText,
 			},
 		}
 	}
 }
 
 
-export { isQdrantConfigured, workspaceSearch, DEFAULT_FILE_TYPE_WEIGHTS } from "./sessionQdrant"
-export type { WorkspaceSearchResult, WorkspaceSearchStats, FileTypeWeights, RrrResult, RrrChunk, RrrDiagnostics, WsQuery } from "./sessionQdrant"
+export { isQdrantConfigured, workspaceSearch, DEFAULT_FILE_TYPE_WEIGHTS, trySearchRRR, indexMessageHistory, indexMessagesBatch, reindexAllHistory, deleteSessionHistoryByTaskId, checkSessionCollectionHealth } from "./sessionQdrant"
+export type { WorkspaceSearchResult, WorkspaceSearchStats, FileTypeWeights, RrrResult, RrrChunk, RrrDiagnostics, WsQuery, TrySearchResult, CollectionHealthStatus } from "./sessionQdrant"

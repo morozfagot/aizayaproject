@@ -1,5 +1,17 @@
 ﻿# Morozcode Changelog
 
+## 2.4.23
+
+### Features
+
+- **Session history indexing status flags (2.9.17.3)**: Added indexing state tracking for RRR vector search. Three states: `idle` (green — RRR runs normally), `indexing` (yellow — RRR waits for background indexing to complete, up to 30s timeout), `error` (red — RRR skipped, `console.error` with details). Flags are set by `indexMessageHistoryFireAndForget()`: transitions to `"indexing"` at start, `"idle"` on success, `"error"` on failure. RRR guard check runs before `getEffectiveApiHistoryWithVectorSearch()` in `recursivelyMakeClineRequests()`. Pipeline logger step 3 now includes `sessionHistoryIndexingState`, `sessionHistoryIndexingError`, and `sessionHistoryIndexedMessagesCount`. ([`Task.ts:815`](AiZayaProject/morozcode/src/core/task/Task.ts#L815), [`Task.ts:1888`](AiZayaProject/morozcode/src/core/task/Task.ts#L1888), [`Task.ts:5548`](AiZayaProject/morozcode/src/core/task/Task.ts#L5548))
+
+## 2.4.22
+
+### Bug Fixes
+
+- **Fix Zoo infinite loop on list_files — RRR/WS pipeline decoupling**: Fixed root cause of infinite `list_files` loop. When RRR (Retrieve-Refine-Retrieve) vector search crashed with "This operation was aborted", the try/catch block caught the error but left `_rrrResult = undefined` and `_rrrMessages = []`. The WS (Workspace Search) was guarded by `if (this._rrrResult)` so it also didn't run. Model received 0 context messages and generated `list_files` to recover, which saved as a fragment, and the cycle repeated infinitely. **Changes**: (1) Removed `queryText` from `RrrResult` interface — query is now an independent component (userTextContent + systemPrompt), not embedded in RRR result. (2) Added `TrySearchResult` interface and `trySearchRRR()` safe wrapper that never throws — returns `{success, chunks, enrichedContext, diagnostics, error}` instead. (3) Removed try/catch around RRR call in Task.ts — `getEffectiveApiHistoryWithVectorSearch()` now uses `trySearchRRR()` internally. (4) WS now runs independently of RRR success — uses `userTextContent` as fallback when RRR finds nothing. (5) WS query is composed of `userTextContent + RRR chunks` (not `rrrResult.queryText`). Model always receives system prompt + current user request + WS context, even if RRR fails completely. ([`sessionQdrant.ts:32`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L32), [`sessionQdrant.ts:39`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L39), [`sessionQdrant.ts:420`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L420), [`condense/index.ts:24`](AiZayaProject/morozcode/src/core/condense/index.ts#L24), [`Task.ts:5425`](AiZayaProject/morozcode/src/core/task/Task.ts#L5425))
+
 ## 2.4.21
 
 ### Features
