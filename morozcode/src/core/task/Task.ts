@@ -5696,42 +5696,31 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// getEffectiveApiHistoryWithVectorSearch uses trySearchRRR internally (catches all errors)
 				// 2.9.17.3: Check session history indexing flags before running RRR
 				if (userTextContent.trim().length > 0 && isQdrantConfigured()) {
-					// 2.9.17.3: Red flag — indexing error, log and skip RRR
+					// 2.9.17.3: Red flag — indexing error, throw hard error
 					if (this._sessionHistoryIndexingState === "error") {
-						console.error(
-							`[Task#${this.taskId}] RRR SKIPPED (red flag): session history indexing error: ${this._sessionHistoryIndexingError ?? "unknown error"}. ` +
-							`Fix the indexing issue before RRR can use vector search.`,
-						)
-						this._rrrResult = undefined
-						this._rrrMessages = []
-					} else {
-						// 2.9.17.3: Yellow flag — indexing in progress, wait for completion
-						if (this._sessionHistoryIndexingState === "indexing") {
-							console.log(`[Task#${this.taskId}] RRR: session history indexing in progress, waiting...`)
-							const maxWaitMs = 30000
-							const pollIntervalMs = 500
-							const startTime = Date.now()
-							while (this._sessionHistoryIndexingState === "indexing" && (Date.now() - startTime) < maxWaitMs) {
-								await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
-							}
-							if (this._sessionHistoryIndexingState === "indexing") {
-								console.error(
-									`[Task#${this.taskId}] RRR SKIPPED: session history indexing still in progress after ${maxWaitMs}ms timeout. ` +
-									`Recent messages may not be indexed yet.`,
-								)
-								this._rrrResult = undefined
-								this._rrrMessages = []
-							} else if (this._sessionHistoryIndexingState === "error") {
-								console.error(
-									`[Task#${this.taskId}] RRR SKIPPED (red flag): session history indexing failed during wait: ${this._sessionHistoryIndexingError ?? "unknown error"}.`,
-								)
-								this._rrrResult = undefined
-								this._rrrMessages = []
-							}
+						throw new Error(`RRR is not available: session history indexing failed. ${this._sessionHistoryIndexingError ?? "unknown error"}. Fix the indexing issue before RRR can use vector search. Conversation History is NEVER sent to the model — only RRR-enriched messages are used.`)
+					}
+					// 2.9.17.3: Yellow flag — indexing in progress, wait for completion
+					if (this._sessionHistoryIndexingState === "indexing") {
+						console.log(`[Task#${this.taskId}] RRR: session history indexing in progress, waiting...`)
+						const maxWaitMs = 30000
+						const pollIntervalMs = 500
+						const startTime = Date.now()
+						while (this._sessionHistoryIndexingState === "indexing" && (Date.now() - startTime) < maxWaitMs) {
+							await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
 						}
-						// 2.9.17.3: Green flag (idle) — run RRR if no error occurred during wait
-						// 2.18: NO MORE `this.apiConversationHistory` parameter — RRR chunks only
-						if (this._sessionHistoryIndexingState === "idle") {
+						if (this._sessionHistoryIndexingState === "indexing") {
+							console.error(
+								`[Task#${this.taskId}] RRR SKIPPED: session history indexing still in progress after ${maxWaitMs}ms timeout. ` +
+								`Recent messages may not be indexed yet.`,
+							)
+							this._rrrResult = undefined
+							this._rrrMessages = []
+						} else if (this._sessionHistoryIndexingState === "error") {
+							throw new Error(`RRR is not available: session history indexing failed during wait. ${this._sessionHistoryIndexingError ?? "unknown error"}. Fix the indexing issue before RRR can use vector search. Conversation History is NEVER sent to the model — only RRR-enriched messages are used.`)
+						} else {
+							// 2.9.17.3: Green flag (idle) — run RRR if no error occurred during wait
+							// 2.18: NO MORE `this.apiConversationHistory` parameter — RRR chunks only
 							const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
 								userTextContent,
 								this.taskId,
@@ -5741,15 +5730,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								rrrEmbedderModelId,
 								systemPrompt,
 							)
-	
+
 							// Save RRR result for pipeline logging
 							this._rrrResult = rrrResult
-	
+
 							if (rrrMessages.length > 0) {
 								// 2.9.15.7: Save RRR messages separately, DO NOT add to apiConversationHistory
 								// Conversation History is NOT sent to the model - only RRR messages are used
 								this._rrrMessages = rrrMessages
-	
+
 								console.log(
 									`[Task#${this.taskId}] RRR enrichment: ${rrrMessages.length} messages, ${rrrResult.diagnostics.extractedTsCount} unique Ts (NOT added to history)`,
 								)

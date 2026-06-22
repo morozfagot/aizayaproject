@@ -1,5 +1,11 @@
 ﻿# Morozcode Changelog
 
+## 2.4.26
+
+### Bug Fixes
+
+- **Throw hard error on session history indexing failure (2.9.17.3)**: Changed RRR behavior when session history indexing fails. Previously, the code silently skipped RRR with `console.error` and continued with empty context. Now throws a hard `Error` to prevent silent failures. This ensures users are immediately aware when RRR cannot function due to indexing errors. The error message clearly states: "RRR is not available: session history indexing failed" with actionable guidance. ([`Task.ts:5700`](AiZayaProject/morozcode/src/core/task/Task.ts#L5700))
+
 ## 2.4.25
 
 ### Bug Fixes
