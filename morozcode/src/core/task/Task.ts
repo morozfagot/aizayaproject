@@ -5733,7 +5733,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								userTextContent,
 								this.taskId,
 								this.globalStoragePath,
-								0.0,
+								0.3,
 								embedderApiKey,
 								rrrEmbedderModelId,
 								systemPrompt,

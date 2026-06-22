@@ -1,5 +1,11 @@
 ﻿# Morozcode Changelog
 
+## 2.4.25
+
+### Bug Fixes
+
+- **RRR algorithm fix — remove arbitrary iteration/fragment limits (2.19)**: Fixed critical RRR (Retrieve-Refine-Retrieve) algorithm bug. Previous implementation used hardcoded `maxIterations=3` and `fragmentsPerIteration=3` — arbitrary values invented by AI that severely limited context retrieval. **Changes**: (1) Removed `maxIterations` and `fragmentsPerIteration` parameters from `rrrSearch()` and `trySearchRRR()`. (2) Changed to `while(true)` loops for Step 1 (current session, filtered by taskId) and Step 2 (all sessions, no taskId filter) — iterations continue until no relevant chunks found or score < threshold. (3) Each iteration now finds exactly 1 chunk (`limit=1`), not 3. (4) Made `taskId` optional in `searchWithFilter()` — `undefined` means search across all sessions. (5) Changed default `scoreThreshold` from `0.0` to `0.3` — filters out irrelevant chunks. (6) Updated `Task.ts` threshold from `0.0` to `0.3`. Success criteria: RRR iterates through ALL messages in session (N-1 iterations), finds 1 chunk per iteration, no arbitrary limits. ([`sessionQdrant.ts:250`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L250), [`sessionQdrant.ts:330`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L330), [`sessionQdrant.ts:529`](AiZayaProject/morozcode/src/core/condense/sessionQdrant.ts#L529), [`condense/index.ts:847`](AiZayaProject/morozcode/src/core/condense/index.ts#L847), [`Task.ts:5736`](AiZayaProject/morozcode/src/core/task/Task.ts#L5736))
+
 ## 2.4.24
 
 ### Bug Fixes

@@ -241,26 +241,36 @@ export function createDirectEmbedder(
 }
 
 /**
- * Search Qdrant with custom filter (type=session_history + taskId).
+ * Search Qdrant with custom filter (type=session_history, optional taskId).
+ *
+ * @param taskId - If provided, filter by specific task. If undefined, search across all sessions.
+ * @param limit - Number of results to return (default 1 for RRR single-chunk iteration).
+ * @param minScore - Minimum score threshold (default 0.0).
  */
 export async function searchWithFilter(
 	client: QdrantClient,
 	collectionName: string,
 	queryVector: number[],
-	taskId: string,
+	taskId?: string,
 	minScore?: number,
 	limit?: number,
 ): Promise<Array<{ payload: Record<string, unknown>; score: number }>> {
+	const mustConditions: Array<{ key: string; match: { value: string } }> = [
+		{ key: "type", match: { value: "session_history" } },
+	]
+	
+	// Only add taskId filter if provided (step 1: current session, step 2: all sessions)
+	if (taskId !== undefined) {
+		mustConditions.push({ key: "taskId", match: { value: taskId } })
+	}
+
 	const searchRequest = {
 		query: queryVector,
 		filter: {
-			must: [
-				{ key: "type", match: { value: "session_history" } },
-				{ key: "taskId", match: { value: taskId } },
-			],
+			must: mustConditions,
 		},
 		score_threshold: minScore ?? 0.0,
-		limit: limit ?? 3,
+		limit: limit ?? 1,
 		params: {
 			hnsw_ef: 128,
 			exact: false,
@@ -303,12 +313,19 @@ export async function searchSimilarMessages(
  * RRR (Retrieve-Refine-Retrieve) iterative vector search.
  *
  * Algorithm:
- * - Iteration 1: search by `queryText + systemPrompt`
- * - Iteration 2: search by `queryText + systemPrompt + foundMessage1`
- * - Iteration 3: search by `queryText + systemPrompt + foundMessage1 + foundMessage2`
+ * - Step 1: Search current session (filtered by taskId) — one chunk per iteration,
+ *           iterating through all messages in the session (N-1 iterations max).
+ * - Step 2: Search all other sessions (no taskId filter) — one chunk per iteration,
+ *           continuing until no more relevant chunks found.
  *
- * Each iteration embeds the concatenated text (not vector averaging).
- * Only NEW unique messages from each iteration are added to the query for the next iteration.
+ * Each iteration:
+ * 1. Embed the query (queryText + systemPrompt + accumulated context from found chunks)
+ * 2. Search Qdrant for 1 nearest chunk with score >= scoreThreshold
+ * 3. If found and relevant → add to context, continue to next iteration
+ * 4. If not found or below threshold → stop current step, proceed to next step
+ *
+ * Only unique chunks (by messageTs + chunkId) are collected.
+ * Only chunks with score >= scoreThreshold are added to the context.
  */
 export async function rrrSearch(
 	embedFunction: (text: string) => Promise<number[]>,
@@ -316,9 +333,7 @@ export async function rrrSearch(
 	collectionName: string,
 	queryText: string,
 	taskId: string,
-	maxIterations: number = 3,
-	fragmentsPerIteration: number = 3,
-	scoreThreshold: number = 0.0,
+	scoreThreshold: number = 0.3,
 	systemPrompt?: string,
 ): Promise<RrrResult> {
 	const messageTsSet = new Set<number>()
@@ -334,64 +349,77 @@ export async function rrrSearch(
 		? `${queryText}\n\n${systemPrompt}`
 		: queryText
 
-	console.log(`[rrrSearch] Starting RRR cycle: query="${currentQueryText.substring(0, 100)}...", threshold=${scoreThreshold}, maxIter=${maxIterations}, limit=${fragmentsPerIteration}, hasSystemPrompt=${!!systemPrompt}`)
+	console.log(`[rrrSearch] Starting RRR cycle: query="${currentQueryText.substring(0, 100)}...", threshold=${scoreThreshold}, hasSystemPrompt=${!!systemPrompt}`)
 
-	for (let iter = 0; iter < maxIterations; iter++) {
+	// ─── Step 1: Search current session (filtered by taskId) ───
+	console.log(`[rrrSearch] Step 1: searching current session (taskId=${taskId})`)
+	
+	let step1Iterations = 0
+	let step1Found = 0
+	
+	while (true) {
+		step1Iterations++
+		
 		// Embed the concatenated text for this iteration
 		const currentVector = await embedFunction(currentQueryText)
 		
-		const results = await searchWithFilter(client, collectionName, currentVector, taskId, scoreThreshold, fragmentsPerIteration)
-
-		console.log(`[rrrSearch] Iteration ${iter + 1}/${maxIterations}: found ${results.length} results`)
+		// Search for 1 nearest chunk in current session
+		const results = await searchWithFilter(client, collectionName, currentVector, taskId, scoreThreshold, 1)
 
 		if (results.length === 0) {
-			console.log(`[rrrSearch] No results at iteration ${iter + 1}, stopping RRR cycle`)
+			console.log(`[rrrSearch] Step 1: no more results after ${step1Iterations} iterations, ${step1Found} chunks found`)
 			break
 		}
 
-		// Log scores for diagnostics
-		const scores = results.map((r) => r.score.toFixed(4))
-		console.log(`[rrrSearch] Iteration ${iter + 1} scores: [${scores.join(", ")}]`)
+		const result = results[0]
+		const score = result.score
 
-		let foundNew = false
+		// Log score for diagnostics
+		console.log(`[rrrSearch] Step 1 iteration ${step1Iterations}: score=${score.toFixed(4)}`)
 
-		for (const result of results) {
-			const payload = result.payload
-			const messageTs = payload.messageTs as string | undefined
-			const chunkId = payload.chunkId as string | undefined
-			const uniqueId = messageTs ? `${messageTs}_${chunkId ?? ""}` : null
+		// Check if score meets threshold
+		if (score < scoreThreshold) {
+			console.log(`[rrrSearch] Step 1: score ${score.toFixed(4)} < threshold ${scoreThreshold}, stopping`)
+			break
+		}
 
-			if (uniqueId && !seenIds.has(uniqueId)) {
-				seenIds.add(uniqueId)
-				foundNew = true
-				if (messageTs) {
-					const tsNum = Number(messageTs)
-					if (!isNaN(tsNum)) {
-						messageTsSet.add(tsNum)
-					}
-				}
-				
-				// Collect the message text for the next iteration's query
-				if (payload.text && typeof payload.text === "string") {
-					foundMessageTexts.push(payload.text)
-				}
-			}
+		const payload = result.payload
+		const messageTs = payload.messageTs as string | undefined
+		const chunkId = payload.chunkId as string | undefined
+		const uniqueId = messageTs ? `${messageTs}_${chunkId ?? ""}` : null
 
-			// Collect unique chunks for RrrResult
-			if (chunkId && !seenChunkIds.has(chunkId)) {
-				seenChunkIds.add(chunkId)
-				chunks.push({
-					chunkId,
-					text: (payload.text as string) || "",
-					score: result.score,
-					messageTs: messageTs ? Number(messageTs) : 0,
-				})
+		// Skip if already seen
+		if (uniqueId && seenIds.has(uniqueId)) {
+			console.log(`[rrrSearch] Step 1: duplicate chunk, stopping`)
+			break
+		}
+
+		if (uniqueId) {
+			seenIds.add(uniqueId)
+		}
+
+		if (messageTs) {
+			const tsNum = Number(messageTs)
+			if (!isNaN(tsNum)) {
+				messageTsSet.add(tsNum)
 			}
 		}
 
-		if (!foundNew) {
-			console.log(`[rrrSearch] No new unique results at iteration ${iter + 1}, stopping RRR cycle`)
-			break
+		// Collect the message text for the next iteration's query
+		if (payload.text && typeof payload.text === "string") {
+			foundMessageTexts.push(payload.text)
+		}
+
+		// Collect unique chunk for RrrResult
+		if (chunkId && !seenChunkIds.has(chunkId)) {
+			seenChunkIds.add(chunkId)
+			chunks.push({
+				chunkId,
+				text: (payload.text as string) || "",
+				score: result.score,
+				messageTs: messageTs ? Number(messageTs) : 0,
+			})
+			step1Found++
 		}
 
 		// Build query for next iteration: queryText + systemPrompt + all found message texts
@@ -399,10 +427,89 @@ export async function rrrSearch(
 			? `${queryText}\n\n${systemPrompt}\n\n${foundMessageTexts.join("\n\n")}`
 			: `${queryText}\n\n${foundMessageTexts.join("\n\n")}`
 		
-		console.log(`[rrrSearch] Next iteration query length: ${currentQueryText.length} chars, ${foundMessageTexts.length} found messages`)
+		console.log(`[rrrSearch] Step 1 iteration ${step1Iterations}: found chunk, query length now ${currentQueryText.length} chars`)
 	}
 
-	console.log(`[rrrSearch] RRR cycle complete: ${messageTsSet.size} unique messageTs, ${chunks.length} chunks`)
+	// ─── Step 2: Search all other sessions (no taskId filter) ───
+	console.log(`[rrrSearch] Step 2: searching all other sessions (no taskId filter)`)
+	
+	let step2Iterations = 0
+	let step2Found = 0
+	
+	while (true) {
+		step2Iterations++
+		
+		// Embed the concatenated text for this iteration
+		const currentVector = await embedFunction(currentQueryText)
+		
+		// Search for 1 nearest chunk across all sessions (no taskId filter)
+		const results = await searchWithFilter(client, collectionName, currentVector, undefined, scoreThreshold, 1)
+
+		if (results.length === 0) {
+			console.log(`[rrrSearch] Step 2: no more results after ${step2Iterations} iterations, ${step2Found} chunks found`)
+			break
+		}
+
+		const result = results[0]
+		const score = result.score
+
+		// Log score for diagnostics
+		console.log(`[rrrSearch] Step 2 iteration ${step2Iterations}: score=${score.toFixed(4)}`)
+
+		// Check if score meets threshold
+		if (score < scoreThreshold) {
+			console.log(`[rrrSearch] Step 2: score ${score.toFixed(4)} < threshold ${scoreThreshold}, stopping`)
+			break
+		}
+
+		const payload = result.payload
+		const messageTs = payload.messageTs as string | undefined
+		const chunkId = payload.chunkId as string | undefined
+		const uniqueId = messageTs ? `${messageTs}_${chunkId ?? ""}` : null
+
+		// Skip if already seen
+		if (uniqueId && seenIds.has(uniqueId)) {
+			console.log(`[rrrSearch] Step 2: duplicate chunk, stopping`)
+			break
+		}
+
+		if (uniqueId) {
+			seenIds.add(uniqueId)
+		}
+
+		if (messageTs) {
+			const tsNum = Number(messageTs)
+			if (!isNaN(tsNum)) {
+				messageTsSet.add(tsNum)
+			}
+		}
+
+		// Collect the message text for the next iteration's query
+		if (payload.text && typeof payload.text === "string") {
+			foundMessageTexts.push(payload.text)
+		}
+
+		// Collect unique chunk for RrrResult
+		if (chunkId && !seenChunkIds.has(chunkId)) {
+			seenChunkIds.add(chunkId)
+			chunks.push({
+				chunkId,
+				text: (payload.text as string) || "",
+				score: result.score,
+				messageTs: messageTs ? Number(messageTs) : 0,
+			})
+			step2Found++
+		}
+
+		// Build query for next iteration
+		currentQueryText = systemPrompt
+			? `${queryText}\n\n${systemPrompt}\n\n${foundMessageTexts.join("\n\n")}`
+			: `${queryText}\n\n${foundMessageTexts.join("\n\n")}`
+		
+		console.log(`[rrrSearch] Step 2 iteration ${step2Iterations}: found chunk, query length now ${currentQueryText.length} chars`)
+	}
+
+	console.log(`[rrrSearch] RRR cycle complete: step1=${step1Found} chunks in ${step1Iterations} iters, step2=${step2Found} chunks in ${step2Iterations} iters, total=${chunks.length} chunks, ${messageTsSet.size} unique messageTs`)
 
 	return {
 		chunks,
@@ -425,9 +532,7 @@ export async function trySearchRRR(
 	collectionName: string,
 	queryText: string,
 	taskId: string,
-	maxIterations: number = 3,
-	fragmentsPerIteration: number = 3,
-	scoreThreshold: number = 0.0,
+	scoreThreshold: number = 0.3,
 	systemPrompt?: string,
 ): Promise<TrySearchResult> {
 	const startTime = Date.now()
@@ -438,8 +543,6 @@ export async function trySearchRRR(
 			collectionName,
 			queryText,
 			taskId,
-			maxIterations,
-			fragmentsPerIteration,
 			scoreThreshold,
 			systemPrompt,
 		)

@@ -850,8 +850,6 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			collectionName,
 			queryText,
 			taskId,
-			3, // maxIterations
-			3, // fragmentsPerIteration
 			threshold, // scoreThreshold
 			systemPrompt, // system prompt for iterative query refinement
 		)
