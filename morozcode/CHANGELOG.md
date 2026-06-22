@@ -1,5 +1,11 @@
 ﻿# Morozcode Changelog
 
+## 2.4.24
+
+### Bug Fixes
+
+- **Disable Conversation History sent to model (2.9.15.7)**: Completely removed conversation history from being sent to the AI model. RRR (Retrieve-Refine-Retrieve) enriched messages are now the ONLY context sent. Changes: (1) Removed `handleContextWindowExceededError()` method entirely — it called `manageContext()` on `apiConversationHistory`. (2) Removed `manageContext()` / `truncateConversation()` block in `attemptApiRequest()` — context trimming is meaningless when history is never sent. (3) Replaced fallback `getEffectiveApiHistory(this.apiConversationHistory)` with empty array `[]`. (4) Added hard `throw Error` if RRR is not configured (no `embedderModelId`) — shows red flag in UI instead of silent fallback. (5) Cleaned up imports: removed `manageContext`, `willManageContext` from context-management, removed `getEffectiveApiHistory` from condense import. Success criteria: `messagesSent: 0` in logs, `totalMessageSize < 20KB`. ([`Task.ts:233`](AiZayaProject/morozcode/src/core/task/Task.ts#L233), [`Task.ts:285`](AiZayaProject/morozcode/src/core/task/Task.ts#L285), [`Task.ts:8520`](AiZayaProject/morozcode/src/core/task/Task.ts#L8520), [`Task.ts:8530`](AiZayaProject/morozcode/src/core/task/Task.ts#L8530))
+
 ## 2.4.23
 
 ### Features
