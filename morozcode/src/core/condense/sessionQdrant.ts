@@ -22,6 +22,20 @@ export interface RrrChunk {
 	text: string
 	score: number
 	messageTs: number
+	// 2.18: Mode metadata from Qdrant payload (authoritative — no synthetic fallback)
+	sourceRole?: string
+	sourceMode?: string
+	requestMode?: string
+	responseMode?: string
+	// 2.18: Flag for chunks lacking full metadata (old pre-2.18 indexed points)
+	incompleteMetadata?: boolean
+}
+
+export interface RrrDroppedChunk {
+	chunkId: string
+	reason: 'missing_metadata'
+	messageTs: number
+	score: number
 }
 
 export interface RrrDiagnostics {
@@ -29,11 +43,15 @@ export interface RrrDiagnostics {
 	extractedTsCount: number
 	reasonForEmpty?: string
 	rrrDurationMs?: number
+	// 2.18: Chunks excluded from context due to insufficient metadata
+	droppedChunks?: RrrDroppedChunk[]
+	// 2.18: Replaces extractedTsCount for diagnostic clarity
+	relevantMessageCount?: number
 }
 
 export interface RrrResult {
 	chunks: RrrChunk[]
-	relevantTs: Set<number>
+	readonly relevantTs: ReadonlySet<number>
 	enrichedContext: boolean
 	diagnostics: RrrDiagnostics
 }
@@ -41,10 +59,31 @@ export interface RrrResult {
 export interface TrySearchResult {
 	success: boolean
 	chunks: RrrChunk[]
-	relevantTs: Set<number>
+	relevantTs: ReadonlySet<number>
 	enrichedContext: boolean
 	diagnostics: RrrDiagnostics
 	error?: string
+}
+
+/**
+ * Build a diagnostics snapshot from an RrrResult.
+ * Extracts droppedChunks, relevantMessageCount, and prepares diagnostics
+ * for pipeline logging — all fields are derived, never synthetic.
+ *
+ * 2.18: Used by Task.ts for pipeline logger diagnostics instead of raw relevantTs.
+ */
+export function getRrrDiagnosticsSnapshot(result: RrrResult): RrrDiagnostics {
+	const droppedChunks = result.diagnostics.droppedChunks ?? []
+	const droppedCount = droppedChunks.length
+	const relevantMessageCount = result.chunks.filter(
+		(c) => !c.incompleteMetadata,
+	).length
+
+	return {
+		...result.diagnostics,
+		droppedChunks: droppedCount > 0 ? droppedChunks : undefined,
+		relevantMessageCount,
+	}
 }
 
 export interface WsQuery {
@@ -413,11 +452,24 @@ export async function rrrSearch(
 		// Collect unique chunk for RrrResult
 		if (chunkId && !seenChunkIds.has(chunkId)) {
 			seenChunkIds.add(chunkId)
+
+			// 2.18: Extract mode metadata from payload (authoritative — never synthetic)
+			const sourceRole = payload.sourceRole as string | undefined
+			const sourceMode = payload.sourceMode as string | undefined
+			const requestMode = payload.requestMode as string | undefined
+			const responseMode = payload.responseMode as string | undefined
+			const incompleteMetadata = !sourceRole || !sourceMode
+
 			chunks.push({
 				chunkId,
 				text: (payload.text as string) || "",
 				score: result.score,
 				messageTs: messageTs ? Number(messageTs) : 0,
+				sourceRole,
+				sourceMode,
+				requestMode,
+				responseMode,
+				incompleteMetadata: incompleteMetadata || undefined,
 			})
 			step1Found++
 		}
@@ -492,11 +544,24 @@ export async function rrrSearch(
 		// Collect unique chunk for RrrResult
 		if (chunkId && !seenChunkIds.has(chunkId)) {
 			seenChunkIds.add(chunkId)
+
+			// 2.18: Extract mode metadata from payload
+			const sourceRole = payload.sourceRole as string | undefined
+			const sourceMode = payload.sourceMode as string | undefined
+			const requestMode = payload.requestMode as string | undefined
+			const responseMode = payload.responseMode as string | undefined
+			const incompleteMetadata = !sourceRole || !sourceMode
+
 			chunks.push({
 				chunkId,
 				text: (payload.text as string) || "",
 				score: result.score,
 				messageTs: messageTs ? Number(messageTs) : 0,
+				sourceRole,
+				sourceMode,
+				requestMode,
+				responseMode,
+				incompleteMetadata: incompleteMetadata || undefined,
 			})
 			step2Found++
 		}
@@ -518,6 +583,7 @@ export async function rrrSearch(
 		diagnostics: {
 			findChunksResult: chunks.map((c) => c.chunkId),
 			extractedTsCount: messageTsSet.size,
+			relevantMessageCount: chunks.filter((c) => !c.incompleteMetadata).length,
 		},
 	}
 }
@@ -743,11 +809,16 @@ export function extractTsFromChunkId(chunkId: string): string | null {
  *
  * Fire-and-forget safe: catches all errors and returns them without throwing.
  *
+ * 2.18: Saves sourceRole and sourceMode in payload for authoritative chunk metadata.
+ * Old indexed points (pre-2.18) lack these fields and retroactively get `incompleteMetadata: true`
+ * when searched, until they are reindexed.
+ *
  * @param message - The ApiMessage to index (must have `ts` field)
  * @param taskId - The task ID for filtering
  * @param workspacePath - The workspace path for collection naming
  * @param embedderApiKey - Optional API key for embedding
  * @param embedderModelId - Optional embedding model ID
+ * @param taskMode - The mode of the task (2.18: saved as sourceMode in payload)
  * @returns Result with indexed=true on success, or indexed=false with error message
  */
 export async function indexMessageHistory(
@@ -756,6 +827,7 @@ export async function indexMessageHistory(
 	workspacePath: string,
 	embedderApiKey?: string,
 	embedderModelId?: string,
+	taskMode?: string,
 ): Promise<{ indexed: boolean; chunksCount: number; error?: string }> {
 	try {
 		// Validate message has timestamp
@@ -824,6 +896,8 @@ export async function indexMessageHistory(
 		}
 
 		// Build points for upsert
+		// 2.18: Save sourceRole (from message.role) and sourceMode (from taskMode) in payload
+		const sourceRole = message.role
 		const points = fragments
 			.map((f, idx) => ({
 				id: `${taskId}_${f.chunk_id}_${messageTs}`,
@@ -834,6 +908,8 @@ export async function indexMessageHistory(
 					messageTs: String(messageTs),
 					chunkId: f.chunk_id,
 					text: f.summary || f.text,
+					sourceRole,
+					sourceMode: taskMode ?? undefined,
 				},
 			}))
 			.filter((p) => p.vector.length > 0)

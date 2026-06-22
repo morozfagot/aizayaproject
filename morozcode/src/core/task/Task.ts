@@ -1907,6 +1907,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				const embeddingModelId = config.get<string>("embeddingModelId")
 
+				// 2.18: Pass taskMode for sourceMode metadata in Qdrant payload
 				const result = await indexMessageHistory(
 
 					message,
@@ -1918,6 +1919,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					apiKey || undefined,
 
 					embeddingModelId || undefined,
+
+					this.taskMode,
 
 				)
 
@@ -5727,9 +5730,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							}
 						}
 						// 2.9.17.3: Green flag (idle) — run RRR if no error occurred during wait
+						// 2.18: NO MORE `this.apiConversationHistory` parameter — RRR chunks only
 						if (this._sessionHistoryIndexingState === "idle") {
 							const { messages: rrrMessages, rrrResult } = await getEffectiveApiHistoryWithVectorSearch(
-								this.apiConversationHistory,
 								userTextContent,
 								this.taskId,
 								this.globalStoragePath,
@@ -8531,13 +8534,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			)
 		}
 
-		if (this._rrrMessages.length > 0) {
-			// RRR found relevant messages — use them as history context
-			effectiveHistory = this._rrrMessages
-		} else {
-			// 2.9.15.7: No RRR messages — send empty array, NOT conversation history
-			effectiveHistory = []
-		}
+		// 2.18: Direct assignment — empty array is valid, no special handling needed
+		// No more `_rrrMessages.length > 0` check
+		effectiveHistory = this._rrrMessages
 
 		const totalHistory = this.apiConversationHistory.length
 		const filteredCount = effectiveHistory.length

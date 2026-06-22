@@ -30,6 +30,7 @@ import {
 	deleteSessionHistoryByTaskId,
 	checkSessionCollectionHealth,
 	type RrrResult,
+	type RrrChunk,
 	type CollectionHealthStatus,
 } from "./sessionQdrant"
 
@@ -493,7 +494,7 @@ ${commandBlocks}
 	// [msg1(parent=X), msg2(parent=X), ..., msgN(parent=X), summary(id=X)]
 	//
 	// Effective for API (filtered by getEffectiveApiHistory):
-	// [summary]  в†ђ Fresh start!
+	// [summary]  ← Fresh start!
 
 	// Tag ALL messages with condenseParent
 	const newMessages = messages.map((msg) => {
@@ -720,27 +721,77 @@ export function cleanupAfterTruncation(messages: ApiMessage[]): ApiMessage[] {
 		return msg
 	})
 }
+
 /**
- * Executes RRR (Retrieve-Refine-Retrieve) vector search cycle
- * for enriching context with relevant session history fragments.
+ * Represents a message constructed from RRR chunk data with preserved metadata.
+ * Used as the bridge between RrrChunk results and the API message format.
  *
- * Algorithm:
- * - Iteration 1: search by queryText + systemPrompt
- * - Iteration 2: search by queryText + systemPrompt + foundMessage1
- * - Iteration 3: search by queryText + systemPrompt + foundMessage1 + foundMessage2
+ * 2.18: All metadata fields come from Qdrant payload — no synthetic defaults.
+ * Chunks with incomplete metadata are flagged via `incompleteMetadata: true`.
+ */
+export interface RrrContextMessage extends ApiMessage {
+	sourceRole?: string
+	sourceMode?: string
+	requestMode?: string
+	responseMode?: string
+	incompleteMetadata?: boolean
+}
+
+/**
+ * Convert RRR chunks to API-compatible messages.
  *
- * @param messages - Full API message history
- * @param queryText - User prompt text for vector search
- * @param taskId - Task ID
- * @param globalStoragePath - Path to global storage
- * @param threshold - Relevance threshold (default 0.0, mapped to Qdrant score_threshold)
- * @param embedderApiKey - API key for embedding service
- * @param embedderModelId - Embedding model ID
- * @param systemPrompt - System prompt (mode instructions, skills, etc.) to include in RRR query
- * @returns Object with filtered history and RRR diagnostics
+ * Each chunk becomes a message with:
+ * - `role`: from authoritative payload metadata (`sourceRole`), or `"user"` as
+ *   structural default for incomplete-metadata chunks
+ * - `content`: single text block containing the chunk text
+ * - `ts`: message timestamp from the chunk
+ * - Extended metadata: `sourceRole`, `sourceMode`, `incompleteMetadata`
+ *
+ * 2.18: This replaces the previous `messages.filter(msg => relevantTs.has(msg.ts))`
+ * approach. RRR chunks are now the ONLY historical context sent to the model.
+ *
+ * @param chunks - RRR search result chunks with metadata
+ * @returns Array of ApiMessage-compatible messages with metadata extensions
+ */
+export function rrrChunksToApiMessages(chunks: RrrChunk[]): RrrContextMessage[] {
+	return chunks.map((chunk) => {
+		// 2.18: sourceRole is authoritative from payload. For incomplete metadata
+		// chunks (pre-2.18 indexed points), use "user" as structural default.
+		const role = chunk.sourceRole ?? "user"
+
+		return {
+			role,
+			content: [{ type: "text" as const, text: chunk.text }],
+			ts: chunk.messageTs,
+			sourceRole: chunk.sourceRole,
+			sourceMode: chunk.sourceMode,
+			requestMode: chunk.requestMode,
+			responseMode: chunk.responseMode,
+			incompleteMetadata: chunk.incompleteMetadata,
+		} as RrrContextMessage
+	})
+}
+
+/**
+ * Get effective API history using RRR vector search.
+ * Searches Qdrant for semantically relevant chunks and returns them as API messages.
+ *
+ * 2.18: The `messages` parameter and `relevantTs`-based filtering are REMOVED.
+ * RRR chunks are now the ONLY historical context sent to the model.
+ * Full `apiConversationHistory` is persisted but NEVER sent to the API.
+ *
+ * @param queryText - User's current input/question to search against
+ * @param taskId - Task ID for scoping the search
+ * @param globalStoragePath - Workspace path for collection naming
+ * @param threshold - Score threshold for relevance (0.0-1.0, default 0.0)
+ * @param embedderApiKey - API key for embedding
+ * @param embedderModelId - Model ID for embedding
+ * @param systemPrompt - System prompt for iterative query refinement
+ * @returns API messages from RRR chunks with RRR diagnostics
+ *
+ * @throws Never throws — returns empty result on any error
  */
 export async function getEffectiveApiHistoryWithVectorSearch(
-	messages: ApiMessage[],
 	queryText: string,
 	taskId: string,
 	globalStoragePath: string,
@@ -749,88 +800,56 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 	embedderModelId?: string,
 	systemPrompt?: string,
 ): Promise<{
-	messages: ApiMessage[];
+	messages: RrrContextMessage[];
 	rrrResult: RrrResult;
 }> {
 	const rrrStartTime = Date.now()
+
+	// Helper to build empty result
+	const emptyResult = (reasonForEmpty: string): { messages: RrrContextMessage[]; rrrResult: RrrResult } => ({
+		messages: [],
+		rrrResult: {
+			chunks: [],
+			relevantTs: new Set<number>(),
+			enrichedContext: false,
+			diagnostics: {
+				findChunksResult: [],
+				extractedTsCount: 0,
+				reasonForEmpty,
+			},
+		},
+	})
+
 	try {
 		// GUARD: Check Qdrant is explicitly configured (not default localhost)
 		if (!isQdrantConfigured()) {
-			return {
-				messages: [],
-				rrrResult: {
-					chunks: [],
-					relevantTs: new Set<number>(),
-					enrichedContext: false,
-					diagnostics: {
-						findChunksResult: [],
-						extractedTsCount: 0,
-						reasonForEmpty: "Qdrant not configured (default localhost)",
-					},
-				},
-			}
+			return emptyResult("Qdrant not configured (default localhost)")
 		}
 
-		// Check query text is not empty
+		// GUARD: Check query text is not empty
 		if (!queryText || queryText.trim().length === 0) {
-			return {
-					messages: [],
-					rrrResult: {
-						chunks: [],
-						relevantTs: new Set<number>(),
-						enrichedContext: false,
-						diagnostics: {
-							findChunksResult: [],
-							extractedTsCount: 0,
-							reasonForEmpty: "Empty query text, skipping RRR",
-						},
-					},
-				}
-			}
-	
-			// Early check: embedding model must be configured
-			// NOTE: embedderModelId is passed from Task.ts via providerRef.getCodebaseIndexEmbedderModelId()
-			// which reads from globalState (where UI saves codebase indexing config).
-			// Do NOT fallback to getEmbeddingModelId() — it reads from settings.json which is NOT written by UI.
-			if (!embedderModelId) {
-				return {
-					messages: [],
-					rrrResult: {
-						chunks: [],
-						relevantTs: new Set<number>(),
-						enrichedContext: false,
-						diagnostics: {
-							findChunksResult: [],
-							extractedTsCount: 0,
-							reasonForEmpty: "No embedding model ID configured. Enable codebase indexing in VS Code: Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
-						},
-					},
-				}
-			}
-	
-			// Get Qdrant config and vector size
-			const qdrantConfig = getQdrantConfig()
-			const vectorSize = getVectorSize(embedderModelId)
-	
-			// Get embedder key: use provided key first, fallback to config/env resolution
-			console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
-			const apiKey = embedderApiKey || getEmbedderApiKey()
-			console.log(`[getEffectiveApiHistoryWithVectorSearch] resolved apiKey: ${!!apiKey}, length: ${apiKey?.length ?? 0}`)
-			if (!apiKey) {
-				return {
-					messages: [],
-					rrrResult: {
-						chunks: [],
-						relevantTs: new Set<number>(),
-						enrichedContext: false,
-						diagnostics: {
-							findChunksResult: [],
-							extractedTsCount: 0,
-							reasonForEmpty: "No embedder API key available",
-						},
-					},
-				}
-			}
+			return emptyResult("Empty query text, skipping RRR")
+		}
+
+		// GUARD: embedding model must be configured
+		if (!embedderModelId) {
+			return emptyResult(
+				"No embedding model ID configured. Enable codebase indexing in VS Code: " +
+				"Roo Code → Code Indexing → choose an Embedding Model, then click 'Save & Index'.",
+			)
+		}
+
+		// Get Qdrant config and vector size
+		const qdrantConfig = getQdrantConfig()
+		const vectorSize = getVectorSize(embedderModelId)
+
+		// Get embedder key: use provided key first, fallback to config/env resolution
+		console.log(`[getEffectiveApiHistoryWithVectorSearch] embedderApiKey provided: ${!!embedderApiKey}, length: ${embedderApiKey?.length ?? 0}`)
+		const apiKey = embedderApiKey || getEmbedderApiKey()
+		console.log(`[getEffectiveApiHistoryWithVectorSearch] resolved apiKey: ${!!apiKey}, length: ${apiKey?.length ?? 0}`)
+		if (!apiKey) {
+			return emptyResult("No embedder API key available")
+		}
 
 		const embedderObj = createDirectEmbedder(apiKey, undefined, embedderModelId)
 		const embedFunction = embedderObj.embedFunction
@@ -850,8 +869,8 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			collectionName,
 			queryText,
 			taskId,
-			threshold, // scoreThreshold
-			systemPrompt, // system prompt for iterative query refinement
+			threshold,
+			systemPrompt,
 		)
 		const rrrDurationMs = Date.now() - rrrStartTime
 
@@ -864,24 +883,24 @@ export async function getEffectiveApiHistoryWithVectorSearch(
 			},
 		}
 
-		if (rrrResultWithTiming.relevantTs.size === 0) {
+		// 2.18: Convert RRR chunks to API messages directly — NO ts-based filtering
+		const messages = rrrChunksToApiMessages(rrrResultWithTiming.chunks)
+
+		if (messages.length === 0) {
 			return {
 				messages: [],
 				rrrResult: {
 					...rrrResultWithTiming,
 					diagnostics: {
 						...rrrResultWithTiming.diagnostics,
-						reasonForEmpty: "RRR found no relevant fragments (relevantTs empty after RRR cycle)",
+						reasonForEmpty: "RRR found no relevant fragments (no chunks after RRR cycle)",
 					},
 				},
 			}
 		}
 
-		// Filter messages by found messageTs
-		const filtered = messages.filter((msg) => msg.ts != null && rrrResultWithTiming.relevantTs.has(msg.ts))
-
 		return {
-			messages: filtered,
+			messages,
 			rrrResult: rrrResultWithTiming,
 		}
 	} catch (error) {
