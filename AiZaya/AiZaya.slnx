@@ -4,7 +4,9 @@
   <Folder Name="/src/API/">
     <Project Path="src/API/AiZaya.Api/AiZaya.Api.csproj" />
   </Folder>
-  <Folder Name="/src/Modules/" />
+  <Folder Name="/src/Modules/">
+    <Project Path="src/Modules/Embedders/AiZaya.Modules.Embedders.Domain/AiZaya.Modules.Embedders.Domain.csproj" Id="44444444-4444-4444-4444-444444444444" />
+  </Folder>
   <Folder Name="/src/Shared/">
     <Project Path="src/Shared/AiZaya.Shared.Domain/AiZaya.Shared.Domain.csproj" Id="214c9653-c979-4847-abab-b39bfa95f4af" />
     <Project Path="src/Shared/AiZaya.Shared.Feature/AiZaya.Shared.Feature.csproj" Id="e32a3690-4b8e-4a54-9ac5-2c9f082d33dd" />
