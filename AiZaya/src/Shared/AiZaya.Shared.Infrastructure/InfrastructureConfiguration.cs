@@ -2,8 +2,11 @@ using AiZaya.Shared.Feature.Clock;
 using AiZaya.Shared.Feature.Data;
 using AiZaya.Shared.Infrastructure.Clock;
 using AiZaya.Shared.Infrastructure.Data;
+using AiZaya.Shared.Infrastructure.Embeddings;
 using AiZaya.Shared.Infrastructure.Outbox;
+using AiZaya.Shared.Infrastructure.Qdrant;
 using AiZaya.Shared.Infrastructure.Serialization;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
@@ -15,7 +18,7 @@ public static class InfrastructureConfiguration
 {
     extension(IServiceCollection services)
     {
-        public IServiceCollection AddInfrastructure(string databaseConnectionString)
+        public IServiceCollection AddInfrastructure(string databaseConnectionString, IConfiguration configuration)
         {
             services.TryAddSingleton<IDateTimeProvider, DateTimeProvider>();
             services.TryAddScoped<IDbConnectionFactory, DbConnectionFactory>();
@@ -32,6 +35,9 @@ public static class InfrastructureConfiguration
             });
 
             services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
+
+            services.AddQdrantInfrastructure(configuration);
+            services.AddEmbeddingsInfrastructure();
 
             return services;
         }
