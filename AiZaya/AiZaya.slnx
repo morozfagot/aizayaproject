@@ -6,6 +6,8 @@
   </Folder>
   <Folder Name="/src/Modules/">
     <Project Path="src/Modules/Embedders/AiZaya.Modules.Embedders.Domain/AiZaya.Modules.Embedders.Domain.csproj" Id="44444444-4444-4444-4444-444444444444" />
+    <Project Path="src/Modules/VectorCollections/AiZaya.Modules.VectorCollections.Domain/AiZaya.Modules.VectorCollections.Domain.csproj" Id="55555555-5555-5555-5555-555555555555" />
+    <Project Path="src/Modules/SessionHistory/AiZaya.Modules.SessionHistory.Domain/AiZaya.Modules.SessionHistory.Domain.csproj" Id="66666666-6666-6666-6666-666666666666" />
   </Folder>
   <Folder Name="/src/Shared/">
     <Project Path="src/Shared/AiZaya.Shared.Domain/AiZaya.Shared.Domain.csproj" Id="214c9653-c979-4847-abab-b39bfa95f4af" />
